@@ -1,33 +1,42 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { datePrefix, nextVersion, tagVersion } from '../scripts/release-version.mjs';
+import { nextVersion, tagVersion } from '../scripts/release-version.mjs';
 
-test('北京时间换日重置日期与序号，序号按数值递增', () => {
-  assert.equal(datePrefix(new Date('2026-10-14T15:59:59Z')), '2026.10.14');
-  assert.equal(datePrefix(new Date('2026-10-14T16:00:00Z')), '2026.10.15');
-  assert.equal(nextVersion(['v2026.10.14.9', 'v2026.10.14.10'], '2026.10.14.10', new Date('2026-10-14T12:00:00Z')), '2026.10.14.11');
-  assert.equal(nextVersion(['v2026.10.14.10'], '2026.10.14.10', new Date('2026-10-14T16:00:00Z')), '2026.10.15.0');
+test('默认 patch 自增，与已发布的 tag 对齐', () => {
+  assert.equal(nextVersion(['v1.1.0'], '1.1.0'), '1.1.1');
+  assert.equal(nextVersion(['v1.0.9', 'v1.1.0'], '1.1.0'), '1.1.1');
+  assert.equal(nextVersion(['v1.1.9'], '1.1.9'), '1.1.10', '按数值进位，不是字符串拼');
 });
 
-test('过渡期的明日版本从 .1 开始，日期追平后沿用当日序号', () => {
-  assert.equal(nextVersion(['v2026.10.15'], '2026.10.15', new Date('2026-10-14T12:00:00Z')), '2026.10.15.1');
-  assert.equal(nextVersion(['v2026.10.15.1'], '2026.10.15.1', new Date('2026-10-15T12:00:00Z')), '2026.10.15.2');
-  assert.equal(nextVersion(['v2026.10.15.2'], '2026.10.15.2', new Date('2026-10-16T12:00:00Z')), '2026.10.16.0');
-  assert.equal(nextVersion(['v2026.2.30.999', 'v2026.2.28.3'], '2026.2.28.3', new Date('2026-02-28T12:00:00Z')), '2026.2.28.4');
+test('清单版本还没对应的 tag 时直接发它本身，不凭空跳号', () => {
+  // 首次从日期版本迁到 semver：清单已改成 1.1.0，但一个 tag 都没有。
+  assert.equal(nextVersion([], '1.1.0'), '1.1.0');
+  assert.equal(nextVersion(['v1.0.0', 'v1.0.1'], '1.1.0'), '1.1.0');
 });
 
-test('清单版本即使没有对应 tag 也占住序号，避免与已发布版本撞号', () => {
-  // 本仓库从上游继承了 2026.11.23.0，但 fork 里没有任何 tag。
-  assert.equal(nextVersion([], '2026.11.23.0', new Date('2026-11-23T04:00:00Z')), '2026.11.23.1');
-  assert.equal(nextVersion([], '2026.11.23.7', new Date('2026-11-23T04:00:00Z')), '2026.11.23.8');
-  assert.equal(nextVersion(['v2026.11.23.2'], '2026.11.23.7', new Date('2026-11-23T04:00:00Z')), '2026.11.23.8');
-  assert.equal(nextVersion([], '2026.11.22.7', new Date('2026-11-23T04:00:00Z')), '2026.11.23.0');
+test('tag 领先清单时以 tag 为准，避免倒着发', () => {
+  // 别人（或别的分支）已经发到 1.2.0，而本地清单还停在 1.1.0。
+  assert.equal(nextVersion(['v1.1.0', 'v1.2.0'], '1.1.0'), '1.2.1');
 });
 
-test('只有 v 前缀的四段版本才是发布 tag', () => {
-  assert.equal(tagVersion('v2026.11.23.1'), '2026.11.23.1');
-  assert.equal(tagVersion('2026.11.23.1'), null);
-  assert.equal(tagVersion('v2026.11.23'), null, '三段版本是迁移期历史，不打 tag');
+test('minor / major 进位把低位清零', () => {
+  assert.equal(nextVersion(['v1.1.3'], '1.1.3', 'minor'), '1.2.0');
+  assert.equal(nextVersion(['v1.4.9'], '1.4.9', 'major'), '2.0.0');
+  assert.throws(() => nextVersion(['v1.1.3'], '1.1.3', 'huge'), /未知的进位方式/);
+});
+
+test('清单不是三段 semver 时明确报错，提示先手工迁移', () => {
+  // 从上游继承的四段日期版本没法算 semver，必须人工定一个起点。
+  assert.throws(() => nextVersion([], '2026.11.23.0'), /不是 semver/);
+  assert.throws(() => nextVersion([], '1.1'), /不是 semver/);
+});
+
+test('只有 v 前缀的三段语义化版本才是发布 tag', () => {
+  assert.equal(tagVersion('v1.1.0'), '1.1.0');
+  assert.equal(tagVersion('v1.1.10'), '1.1.10');
+  assert.equal(tagVersion('1.1.0'), null, '缺 v 前缀不算');
+  assert.equal(tagVersion('v2026.11.23.0'), null, '四段日期版本是迁移前的历史');
+  assert.equal(tagVersion('v1.1'), null);
   assert.equal(tagVersion('vnightly'), null);
   assert.equal(tagVersion(''), null);
 });

@@ -3,11 +3,15 @@
 // 提交 → 打 tag → 推送。推送 tag 后由 .github/workflows/release.yml 构建并创建 Release。
 // package-lock.json 不动（本仓库约定不入库；npm ci 也不校验它的 version 字段）。
 //
+// 版本是 semver，与 tag 一致（v1.1.0 ↔ 1.1.0），默认 patch 自增。
+//
 // 用法：
-//   npm run release                  # 计算当天下一个版本并发版
+//   npm run release                  # 计算下一个版本并发版（默认 patch）
+//   npm run release -- --minor       # 次版本进位：1.1.3 → 1.2.0
+//   npm run release -- --major       # 主版本进位：1.1.3 → 2.0.0
 //   npm run release -- --dry-run     # 只打印将要执行的步骤
 //   npm run release -- --no-push     # 只在本地产出提交和 tag
-//   npm run release -- --version 2026.11.23.7
+//   npm run release -- --version 1.2.0
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -19,6 +23,8 @@ const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const push = !args.includes('--no-push');
 const forced = args.includes('--version') ? args[args.indexOf('--version') + 1] : undefined;
+const BUMP_FLAGS = ['--major', '--minor', '--patch'];
+const bump = BUMP_FLAGS.find(flag => args.includes(flag))?.slice(2) ?? 'patch';
 
 const git = (...argv) => execFileSync('git', argv, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim();
 const readJSON = path => JSON.parse(readFileSync(join(root, path), 'utf8'));
@@ -53,14 +59,14 @@ if (behind > 0) {
 
 const currentVersion = readJSON('plugin.json').version;
 const tags = git('tag', '--list').split('\n').filter(Boolean);
-const version = forced || nextVersion(tags, currentVersion, new Date());
+const version = forced || nextVersion(tags, currentVersion, bump);
 const tag = `v${version}`;
 
 console.log(`分支        ${branch}`);
 console.log(`当前版本    ${currentVersion}`);
-console.log(`新版本      ${version}`);
+console.log(`新版本      ${version}${forced ? '（--version 指定）' : `（${bump} 进位）`}`);
+// 只按 tag 判重：清单版本还没发过时，本次发的就是它本身，不能当「未变化」拒掉。
 if (tags.includes(tag)) throw new Error(`${tag} 已存在；要重发请先删除该 tag（含远端）再跑`);
-if (version === currentVersion) throw new Error(`版本号未变化（${version}），无需发版`);
 
 if (dryRun) {
   console.log('\n[dry-run] 将更新 package.json / plugin.json');
