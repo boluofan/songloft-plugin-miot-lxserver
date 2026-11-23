@@ -92,7 +92,7 @@ Search priority, match threshold, timeout, **direct-link play without import**, 
 
 ## Releases
 
-The authoritative release workflow and Beijing date/revision numbering are documented in [automatic releases](docs/en/releases.md).
+Releases are tag-driven; the workflow and Beijing date/revision numbering are documented in [releases](docs/en/releases.md).
 
 ## Registering a search provider
 

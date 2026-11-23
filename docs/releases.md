@@ -1,19 +1,58 @@
-# 自动发布
+# 发布
 
-推送到 `main` 后，Release Plugin 工作流按主线顺序逐一构建尚未发布的非文档业务提交。一次推送包含多个提交或构建期间收到新提交时，每个非文档提交分别出包。仅修改 Markdown（`.md` / `.mdx`）或 `docs/` 下文档及资源的提交不出包、不占版本序号；与代码或打包配置混合修改时正常出包。工作流路径过滤与补发队列均排除纯文档提交，因此手动运行或后续代码推送也不会补发旧文档提交。工作流生成的 `chore(release): bump to v...` 提交不会再次发包；手动运行工作流可续跑未完成的代码队列。
+发布由 tag 驱动，流程与 `mimusic-jsplugin-audiobook` 一致：本地脚本改版本、提交、打 tag 并推送，CI 只对 `v*` tag 响应。**分支推送不打包、不发版、不占版本号。**
 
-版本为 `YYYY.M.D.N`，日期使用北京时间，正常情况下每天首包为 `.0`，后续包按现有 tag 的最大序号加一（`.9` 后为 `.10`）。tag 带 `v`，清单中的版本不带。保留已有 tag 和 Release，不覆盖旧包。已分配 tag 的序号不复用，发布失败可能留下序号间隔。
-
-迁移期间已发布三段 `2026.10.15`，日期追上前沿用 `2026.10.15.x`；由于三段版本与 `.0` 数值相同，首个迁移包从 `.1` 开始。日期追上后沿用该日期已有序号，下一新日期从 `.0` 开始。
-
-每个包先完成类型检查、插件与前端测试、构建和校验。tag 指向对应源码提交加版本元数据的快照，不把旧产物挂到较新的源码上。Release 说明中的 `Source commit` 和 `plugin.json.releaseSource` 记录原始业务提交；主线中的版本提交同步版本、下载地址与包哈希。
-
-发布成功但主线元数据推送失败时，续跑会接回同一提交已发布的版本，不重复发包。检查失败则保留队列位置，后续工作流从该提交续跑。
-
-本地验证发布逻辑：
+## 一次发布
 
 ```bash
-node --test tests/release_pipeline.test.mjs
+npm run release                            # 算出版本、提交、打 tag、推送
+npm run release -- --dry-run               # 只打印将要执行的步骤
+npm run release -- --no-push               # 只在本地产出提交和 tag
+npm run release -- --version 2026.11.23.7  # 指定版本（重发或补号用）
 ```
 
-测试使用临时本地 Git 远端与模拟 GitHub Release，覆盖跨日、序号、迁移、批量提交、构建期间的新提交、纯文档新增/删除跳过、文档后的代码正常续发、失败续跑、避免重复发布及 tag/源码对应关系，不向真实仓库发布。
+`scripts/bump-version.mjs` 依次做四件事：
+
+1. 按北京时间算出版本 `YYYY.M.D.N`：当天首个包为 `.0`，之后取「已有 tag 与清单版本的最大序号」加一；`plugin.json` 里继承自上游的版本也会占住序号，避免与已发布版本撞号。
+2. 同步写 `package.json` 与 `plugin.json`（`package-lock.json` 按本仓库约定不入库，不改也不提交；`npm ci` 不校验它的 `version` 字段）。
+3. 提交 `chore(release): bump to v…`，打附注 tag `v…`。
+4. `git push origin HEAD:<当前分支> --follow-tags`。
+
+工作区不干净会直接拒绝：打包的是 tag 指向的源码，未提交的改动会漏在包外。`package-lock.json` 与 `src/data/*` 是例外（前者是 npm 的版本号副作用、后者由 prebuild 重新生成），只会打印警告。
+
+## CI 做什么
+
+`.github/workflows/release.yml` 监听 `push: tags: ['v*']`，按顺序：
+
+1. checkout 该 tag；
+2. 校验 `plugin.json.version` 与 tag 一致，不一致立即失败（防止 tag 和清单对不上）；
+3. `npm ci`（含 `frontend/`）、两层 `tsc --noEmit`；
+4. 插件全量测试 `node --experimental-strip-types --test tests/*.test.mjs` 与前端测试；
+5. `npm run build` + `npm run validate`；
+6. `gh release create` 上传 `dist/miot.jsplugin.zip`，说明由 GitHub 自动生成；
+7. 把 `download_url`、`updateUrl`、`entryHash`、`zipHash`、`releaseSource` 回写到默认分支（`lxserver`）的 `plugin.json` 并提交。
+
+第 7 步只补发布后才存在的信息，版本号在 tag 里已经改过。`updateUrl` 指向本仓库默认分支，插件自更新取的是本项目的包，不会回落到上游。`releaseSource` 记该包的构建提交，由 CI 写入（上游同名流程也是自己写），不写会一直留着上游的旧 SHA。
+
+`main` 只作上游镜像（通过 GitHub Sync fork 维护），不参与发布，也不接受发布元数据提交。
+
+## 失败与重发
+
+- 校验或构建失败：该 tag 不会产生 Release。修好后删除 tag 再重发：
+
+  ```bash
+  git tag -d v2026.11.23.1
+  git push origin :refs/tags/v2026.11.23.1
+  npm run release -- --version 2026.11.23.1
+  ```
+
+- Release 建好但元数据回写失败：直接重跑工作流（Actions → Release Plugin → Re-run），不会重复上传同一个 Release。
+- 已分配的版本号不复用，失败可能留下空号。
+
+## 本地验证
+
+```bash
+node --test tests/release_version.test.mjs   # 版本号与 tag 规则
+```
+
+换日、序号递增、迁移期三段版本、清单版本占号这些规则由这组用例覆盖，测试不访问网络也不会发布。

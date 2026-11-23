@@ -22,7 +22,7 @@ This is the development entry point for `songloft-org/songloft-plugin-miot`, cov
 
 ## Validation commands
 
-See [automatic releases](docs/en/releases.md): each non-documentation mainline business commit gets a package using Beijing `YYYY.M.D.N`, normally resetting to `.0` on a new date. Markdown-only / `docs/` commits produce no package or revision; version commits do not recurse. Changes to release scripts require `node --test tests/release_pipeline.test.mjs` and checks for documentation skipping, retry recovery and tag/source correspondence.
+Releases are tag-driven, see [releases](docs/en/releases.md): `npm run release` bumps the Beijing `YYYY.M.D.N` version, commits, tags and pushes; CI verifies the tag matches the manifest, runs type checks, tests, build and package validation, creates the Release, then backfills download URL, update URL and package hashes to the default branch. Branch pushes never publish. Changing the release scripts requires `node --test tests/release_version.test.mjs`.
 
 Run in this repository:
 
