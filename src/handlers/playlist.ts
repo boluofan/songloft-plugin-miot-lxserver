@@ -15,6 +15,7 @@ import { MinaService } from "../service/service";
 import { ConfigManager, playlistProgressScope } from "../config/manager";
 import { callHostAPI } from "../utils/http";
 import { findFavoritesPlaylist } from "../utils/favorites";
+import { isSongInPlaylist } from "../utils/playlist_membership";
 import {
   allSongsPlaylist,
   isAllSongsPlaylist,
@@ -1220,10 +1221,7 @@ export function registerPlaylistHandlers(
       if (!favPlaylist) {
         return jsonResponse({ success: true, data: { is_favorited: false } });
       }
-      const songs = await songloft.playlists.getSongs(favPlaylist.id, {
-        limit: 100000,
-      });
-      const isFavorited = songs.some((song) => Number(song.id) === songId);
+      const isFavorited = await isSongInPlaylist(favPlaylist.id, songId);
       return jsonResponse({
         success: true,
         data: { is_favorited: isFavorited, playlist_id: favPlaylist.id },

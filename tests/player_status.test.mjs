@@ -80,6 +80,8 @@ async function withStatus(run) {
     '../config/manager': {},
     '../utils/http': {},
     '../utils/favorites': {},
+    // 收藏成员判断有独立测试，这里不需要真实实现
+    '../utils/playlist_membership': { isSongInPlaylist: async () => false },
   });
   const resets = [];
   let localPosition = 20;
