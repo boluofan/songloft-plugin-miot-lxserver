@@ -918,14 +918,26 @@ export class OnlineSearcher {
    * 当 /api/v1/songs/remote 因唯一键约束冲突等无法重复导入时作为回退
    */
   private async findExistingSong(title: string, artist: string): Promise<{ id: number; url: string } | null> {
+    if (!title) return null;
     try {
-      let songLimit = 10000;
-      try {
-        const cfg = await this.configManager.getConfig();
-        songLimit = Math.max(1000, Math.min(100000, cfg.max_song_index ?? 10000));
-      } catch {}
-      const allSongs = await songloft.songs.list({ limit: songLimit });
-      const match = allSongs.find(s =>
+      // 以前用 songs.list() 把整个曲库（最多 10 万首）拉进内存再 find 一首歌。
+      // 改走宿主 keyword 过滤：它同时 LIKE title/artist/album/标签/参与歌手，先筛到几十条
+      // 再精确比对，单次开销从 O(曲库) 降到 O(50)。显式 none 与索引用 SDK 桥接的口径对齐
+      // （那条桥不排除隐藏歌单，REST 缺省会排除 hidden）。
+      const pluginToken = await songloft.plugin.getToken();
+      const serverHost = await getHostAPIBaseUrl();
+      const path = `/api/v1/songs?keyword=${encodeURIComponent(title)}`
+        + `&limit=50&offset=0&exclude_playlist_labels=none`;
+      const resp = await fetch(serverHost + path, {
+        headers: { Authorization: `Bearer ${pluginToken}` },
+      });
+      if (!resp.ok) {
+        songloft.log.warn(`[OnlineSearcher] findExistingSong failed status=${resp.status}`);
+        return null;
+      }
+      const page = JSON.parse(await resp.text()) as { songs?: any[] };
+      const rows = Array.isArray(page?.songs) ? page.songs : [];
+      const match = rows.find(s =>
         s.title === title &&
         s.artist === artist &&
         (s.type === 'remote' || s.url?.startsWith('http'))

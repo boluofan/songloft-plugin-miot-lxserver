@@ -43,7 +43,7 @@ const jsonResp = (data, status = 200) => ({
   text: async () => (typeof data === 'string' ? data : JSON.stringify(data)),
 });
 
-function fixture(t, { lx = lxConfig(), noImport = false, imported = { id: 9 } } = {}) {
+function fixture(t, { lx = lxConfig(), noImport = false, imported = { id: 9 }, emptyImport = false } = {}) {
   const previous = globalThis.songloft;
   globalThis.songloft = {
     log: { info() {}, warn() {}, error() {} },
@@ -55,6 +55,8 @@ function fixture(t, { lx = lxConfig(), noImport = false, imported = { id: 9 } } 
   t.mock.method(globalThis, 'fetch', async (url, init) => {
     requests.push({ url, init });
     if (url.includes('/songs/remote')) {
+      // 模拟唯一键冲突：宿主判定这首歌已存在，不回新行
+      if (emptyImport) return jsonResp({ count: 0, songs: [] });
       const body = JSON.parse(init.body);
       return jsonResp({
         count: body.length,
@@ -69,6 +71,13 @@ function fixture(t, { lx = lxConfig(), noImport = false, imported = { id: 9 } } 
           source_data: item.source_data,
           dedup_key: item.dedup_key,
         })),
+      });
+    }
+    if (url.includes('/api/v1/songs?keyword=')) {
+      // 入库失败后的查重复用：宿主 keyword 过滤同时 LIKE title/artist/album/标签/参与歌手
+      return jsonResp({
+        songs: [{ id: 42, title: '晴天', artist: '周杰伦', type: 'remote', url: '/api/v1/songs/42/play' }],
+        total: 1,
       });
     }
     if (url.includes('/api/music/search')) {
@@ -173,4 +182,28 @@ test('歌手队列直推模式：仍是懒解析，mode=push 且首批只解析 
   assert.equal(queue.mode, 'push');
   assert.equal(requests.filter(r => r.url.includes('/api/music/url')).length, 2);
   assert.match(queue.peekUrl(0), /audio\.test/);
+});
+
+test('入库返回空（唯一键冲突）时，查重复用 keyword 过滤而不是拉全曲库', async t => {
+  const { searcher, requests } = fixture(t, { noImport: false, emptyImport: true });
+  const song = await searcher.search('晴天', { title: '晴天', artist: '周杰伦' });
+  assert.ok(song);
+
+  const mina = fakeMina();
+  const ok = await searcher.playSearchResult(song, 'acc', 'dev', mina);
+  assert.equal(ok, true);
+
+  const probe = requests.find(r => r.url.includes('/api/v1/songs?keyword='));
+  assert.ok(probe, '查重应改用宿主 keyword 过滤');
+  assert.equal(decodeURIComponent(/keyword=([^&]*)/.exec(probe.url)[1]), '晴天');
+  assert.match(probe.url, /limit=50/, '先筛到几十条再精确比对，不拉全库');
+  assert.match(probe.url, /exclude_playlist_labels=none/, '与索引口径一致，隐藏歌单里的也算');
+  assert.equal(
+    requests.filter(r => r.url.includes('/api/v1/songs/names')).length,
+    0,
+    '查重是歌曲维度，不该去打歌手名录',
+  );
+
+  assert.equal(mina.pushed.length, 1, '复用已存在的 remote 歌，不重复入库');
+  assert.match(mina.pushed[0], /\/api\/v1\/songs\/42\/play/, '推的是已存在歌曲的播放端点');
 });
