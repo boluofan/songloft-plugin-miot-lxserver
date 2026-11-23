@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// 本地发布入口：算版本 → 改 package.json / package-lock.json / plugin.json →
+// 本地发布入口：算版本 → 改 package.json / plugin.json →
 // 提交 → 打 tag → 推送。推送 tag 后由 .github/workflows/release.yml 构建并创建 Release。
+// package-lock.json 不动（本仓库约定不入库；npm ci 也不校验它的 version 字段）。
 //
 // 用法：
 //   npm run release                  # 计算当天下一个版本并发版
