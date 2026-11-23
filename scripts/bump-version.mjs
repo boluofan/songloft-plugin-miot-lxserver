@@ -36,10 +36,21 @@ const dirty = status.split('\n').filter(line => line && !DIRTY_IGNORED.test(line
 if (ignored.length) console.warn(`⚠️ 忽略 ${ignored.length} 个约定不入库的改动：package-lock.json / src/data/*`);
 if (dirty.length) throw new Error(`工作区有未提交改动，先提交或 stash：\n${dirty.join('\n')}`);
 
-// 拉一下远端 tag：别人（或 CI 回写后）可能已经占掉当天序号。
-try { git('fetch', 'origin', '--tags', '--quiet'); }
-catch { console.warn('⚠️ 无法从 origin 拉取 tag，按本地现有 tag 计算版本'); }
 const branch = git('rev-parse', '--abbrev-ref', 'HEAD');
+
+// 拉一下远端：tag 决定当天序号（别人或 CI 可能已经占掉），分支引用决定这次能不能推成功。
+try { git('fetch', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`, '--tags', '--quiet'); }
+catch { console.warn('⚠️ 无法从 origin 拉取 tag，按本地现有 tag 计算版本'); }
+
+// CI 发完版会往默认分支回写一个清单提交，本地就此落后；落后时 push 必被拒，
+// 但那时版本号已改、tag 已建好，收尾很别扭——所以在动任何文件之前先拦住。
+let behind = 0;
+try { behind = Number(git('rev-list', '--count', `HEAD..origin/${branch}`)); }
+catch { /* 远端还没有这个分支，属于首次推送，不必检查 */ }
+if (behind > 0) {
+  throw new Error(`本地 ${branch} 落后 origin/${branch} ${behind} 个提交（通常是 CI 回写的清单）。先同步再发版：\n  git pull --ff-only origin ${branch}`);
+}
+
 const currentVersion = readJSON('plugin.json').version;
 const tags = git('tag', '--list').split('\n').filter(Boolean);
 const version = forced || nextVersion(tags, currentVersion, new Date());
