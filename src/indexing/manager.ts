@@ -1433,9 +1433,10 @@ export class IndexingManager {
   }
 
   /**
-   * 曲库歌手名名录（`GET /api/v1/songs/names?field=artist&exclude_playlist_labels=none`），进程内缓存。
+   * 曲库歌手名名录（`GET /api/v1/songs/names?field=artist&exclude_playlist_labels=none&type=local,remote`），进程内缓存。
    * 老宿主没有这条路由（404 / 400）时返回 null，并在冷却期内不再重试。
    * 显式 `none`：索引走 SDK 的 songs.list 桥接不排除隐藏歌单，名录/取歌都要与之对齐。
+   * 显式 `type`：电台歌手排除在外，减少无用候选与多余的精确取歌请求。
    */
   private async getArtistNames(): Promise<{ names: string[]; norm: string[] } | null> {
     const now = Date.now();
@@ -1461,7 +1462,10 @@ export class IndexingManager {
   private async fetchArtistNames(now: number): Promise<{ names: string[]; norm: string[] } | null> {
     try {
       const resp = await callHostAPI<{ names?: unknown }>(
-        'GET', '/api/v1/songs/names?field=artist&exclude_playlist_labels=none', undefined, { timeoutMs: ARTIST_NAMES_TIMEOUT_MS },
+        // type 只取 local,remote：电台歌手进名录只会多出无用候选、白打几次 ?artist=
+        // （取歌那边也会跳过 radio）。与 exclude_playlist_labels 一样，都是「只拿能用得上的」。
+        'GET', '/api/v1/songs/names?field=artist&exclude_playlist_labels=none&type=local,remote',
+        undefined, { timeoutMs: ARTIST_NAMES_TIMEOUT_MS },
       );
       const names = (Array.isArray(resp?.names) ? resp!.names as unknown[] : [])
         .map(value => String(value ?? '').trim())

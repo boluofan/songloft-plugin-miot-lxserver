@@ -261,6 +261,31 @@ test('resolveArtistSongs：名录命中后精确取歌，且名录走进程内�
   );
 });
 
+test('resolveArtistSongs：老形态名录返回整串署名时原样回填 ?artist=', async () => {
+  // c303d54(2026-07-31) ~ 54e820b(2026-09-14) 之间的宿主：names 返回 DISTINCT songs.artist
+  // 整串（如 "刘德华 & 张学友"），songs?artist= 也是整串 Eq。插件必须把名录里的原值回填，
+  // 不能拿用户口令里的单个名字去查——那在老宿主上会一个都匹配不到。
+  const manager = await createIndex([], new Map());
+  const credit = '刘德华 & 张学友';
+
+  const calls = stubHostAPI((method, path) => {
+    if (path.startsWith('/api/v1/songs/names')) {
+      return { field: 'artist', names: [credit, '其他歌手'], total: 2 };
+    }
+    const artist = decodeURIComponent(/artist=([^&]*)/.exec(path)[1]);
+    assert.equal(artist, credit, '回填的是名录里的整串规范署名，不是用户口令里的单个名字');
+    return {
+      songs: [{ id: 201, title: '合唱歌曲', artist: credit, type: 'local', url: '/api/v1/songs/201/play' }],
+      total: 1,
+    };
+  });
+
+  // 口令只说了一个搭档，包含匹配命中整串署名，再原样回填即可取到那首合唱
+  const songs = await manager.resolveArtistSongs('张学友');
+  assert.deepEqual(songs.map(song => song.id), [201], '老形态名录下也能取到歌');
+  assert.equal(calls.filter(call => call.path.startsWith('/api/v1/songs?')).length, 1, '只问了命中的那一个署名');
+});
+
 test('resolveArtistSongs：索引和名录取并集，remote 歌不会被名录链路挤掉', async () => {
   // 主程序的 AddRemoteSongs → UpsertRemote → Create() 只写 songs 表、不写 song_artists，
   // 所以宿主名录 / ?artist= 看不到插件导入的 remote 歌；索引扫描必须保留。
@@ -271,6 +296,7 @@ test('resolveArtistSongs：索引和名录取并集，remote 歌不会被名录�
   stubHostAPI((method, path) => {
     if (path.startsWith('/api/v1/songs/names')) {
       assert.match(path, /exclude_playlist_labels=none/, '名录也要显式不排除隐藏歌单，与索引口径一致');
+      assert.match(path, /type=local,remote/, '电台歌手不进名录，避免无用候选与多余取歌请求');
       // 新主程序artist 维度走 song_artists 关联表，返回拆开的单个歌手
       return { field: 'artist', names: ['刘德华', '其他歌手'], total: 2 };
     }
