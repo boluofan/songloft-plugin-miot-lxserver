@@ -34,7 +34,7 @@ function harness(options = {}) {
     watchers = [];
   let mounted, unmounted;
   const source = readSetup("views/settings/AIModelSettings.vue").replace(
-    /^import[\s\S]*?;\n/gm,
+    /^import[\s\S]*?;\r?\n/gm,
     "",
   );
   const env = {

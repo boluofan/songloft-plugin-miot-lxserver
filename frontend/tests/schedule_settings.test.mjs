@@ -6,7 +6,7 @@ import { readSetup } from './setup-source.mjs';
 
 function settings(intl, timezone = 'Asia/Shanghai') {
   const source = readSetup('views/settings/ScheduleSettings.tsx').replace(
-    /^import[\s\S]*?;\n/gm,
+    /^import[\s\S]*?;\r?\n/gm,
     '',
   );
   const hooks = [];

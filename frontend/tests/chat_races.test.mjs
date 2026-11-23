@@ -138,7 +138,7 @@ function script(file, env, exports) {
           )
           .replace(/export /g, '')
       : readSetup(file)
-  ).replace(/^import[\s\S]*?;\n/gm, '');
+  ).replace(/^import[\s\S]*?;\r?\n/gm, '');
   const js = ts.transpileModule(source + `\nreturn { ${exports} };`, {
     compilerOptions: {
       target: ts.ScriptTarget.ES2020,
