@@ -26,9 +26,9 @@
     "/dlna"
   ],
   "updateUrl": "https://raw.githubusercontent.com/boluofan/songloft-plugin-miot-lxserver/lxserver/plugin.json",
-  "download_url": "https://github.com/boluofan/songloft-plugin-miot-lxserver/releases/download/v1.1.0/miot.jsplugin.zip",
-  "entryHash": "23a3eb6145acb6386aad358adf5093bdc0ffe4e25a743e80375b52274dd4e679",
-  "zipHash": "1f077e2304c18ca71e00ba63ac646a4fb875e3408a9bc700e80f306e645f65b9",
-  "releaseSource": "4ad8d22d66bad8a3008f18e83a9b3dac416e68f8",
+  "download_url": "https://github.com/boluofan/songloft-plugin-miot-lxserver/releases/download/v1.1.1/miot.jsplugin.zip",
+  "entryHash": "3612381e95202fb9438d8cb7fa90cdc1386003cd8cd7825b3adcaba82ae66b78",
+  "zipHash": "394150b1a4bd9aba45c9c1d97eee3b6dbf321e7060f6d673bb413964574e2c1d",
+  "releaseSource": "4cadc29751305c62507247d5016f66a0afb08e67",
   "staticHash": false
 }
