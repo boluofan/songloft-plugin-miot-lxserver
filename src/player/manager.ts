@@ -4462,15 +4462,9 @@ export class PlaylistManagerMap {
           }
           continue;
         }
-        // 与 play_artist 保持一致：全曲库匹配（含不在任何歌单里的歌），否则重启后队列会莫名变短
-        const artistLocs = indexingManager.findSongsByArtist(artist, { includeLibrary: true });
-        if (artistLocs.length === 0) {
-          songloft.log.info(`[PlaylistManagerMap] restoreTempPlaylists: no songs for "${artist}", skipping`);
-          (manager as any).pendingTempArtist = '';
-          continue;
-        }
-
-        const fullSongs = await indexingManager.loadArtistSongs(artistLocs, isCurrent);
+        // 与 play_artist 保持一致：全曲库匹配（含不在任何歌单里的歌），否则重启后队列会莫名变短。
+        // resolveArtistSongs 内部优先走宿主名录 + 精确过滤，老宿主自动退回索引扫描。
+        const fullSongs = await indexingManager.resolveArtistSongs(artist, isCurrent);
         if (!isCurrent()) continue;
 
         if (fullSongs.length > 0) {

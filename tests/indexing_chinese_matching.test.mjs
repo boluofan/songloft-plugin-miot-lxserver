@@ -7,6 +7,14 @@ const require = createRequire(import.meta.url);
 const ts = require('typescript');
 const modules = new Map();
 
+// src/utils/http.ts 要引 @songloft/plugin-sdk（本机没有 toolchain 源码），
+// 而歌手匹配这一侧只需要 callHostAPI 一个出口 —— 换成可编程桩，
+// 用来驱动「歌手名名录 → /songs?artist= 精确取歌」两步链路。
+let hostAPIHandler = async () => { throw new Error('host API not stubbed'); };
+const httpStub = {
+  callHostAPI: (method, path, body, options) => hostAPIHandler(method, path, body, options),
+};
+
 function loadSource(url) {
   if (modules.has(url.href)) return modules.get(url.href);
   const { outputText } = ts.transpileModule(readFileSync(url, 'utf8'), {
@@ -15,6 +23,7 @@ function loadSource(url) {
   const exports = {};
   modules.set(url.href, exports);
   new Function('require', 'exports', outputText)(name => {
+    if (name === '../utils/http') return httpStub;
     assert.ok(name.startsWith('.'), `unexpected runtime dependency: ${name}`);
     return loadSource(new URL(`${name}.ts`, url));
   }, exports);
@@ -22,6 +31,16 @@ function loadSource(url) {
 }
 
 const { IndexingManager } = loadSource(new URL('../src/indexing/manager.ts', import.meta.url));
+
+/** 宿主接口桩：handler 收到 (method, path)，返回体照真实形状给 */
+function stubHostAPI(handler) {
+  const calls = [];
+  hostAPIHandler = async (method, path) => {
+    calls.push({ method, path });
+    return handler(method, path);
+  };
+  return calls;
+}
 
 async function createIndex(songs, playlistSongs = new Map([[1, songs]])) {
   globalThis.songloft = {
@@ -38,6 +57,8 @@ async function createIndex(songs, playlistSongs = new Map([[1, songs]])) {
   const manager = new IndexingManager();
   assert.equal((await manager.refresh()).success, true);
   assert.equal(await manager.waitForPlaylistCache(), true);
+  // 默认让宿主接口不可用：走索引扫描的老用例不受影响，需要名录链路的用例自己再桩一次
+  hostAPIHandler = async () => { throw new Error('host API not stubbed'); };
   return manager;
 }
 
@@ -191,6 +212,128 @@ test('全曲库匹配：刚导入的歌立刻可被歌手口令命中（无需�
     (await manager.loadArtistSongs(locs)).map((song) => song.id),
     [42],
   );
+});
+
+// ===== 两步式歌手解析（宿主名录 → 精确取歌） =====
+// 索引受 max_song_index 限制、且只能拿到索引里那点字段；宿主 /songs/names 给出全量去重署名，
+// 再用 /songs?artist= 精确取回完整 Song，能覆盖索引扫不到的歌。
+
+test('resolveArtistSongs：名录命中后精确取歌，且名录走进程内缓存', async () => {
+  // 索引刻意留空：一旦回退到索引扫描就必然返回空，能反证结果确实来自宿主链路
+  const manager = await createIndex([], new Map());
+
+  const calls = stubHostAPI((method, path) => {
+    if (path.startsWith('/api/v1/songs/names')) {
+      assert.equal(method, 'GET');
+      return { field: 'artist', names: ['刘德华', '林俊杰'], total: 2 };
+    }
+    assert.match(path, /^\/api\/v1\/songs\?artist=/, '命中署名后要回填 /songs?artist=');
+    assert.match(path, /limit=100000/, '一次拿全，不做分页');
+    assert.match(path, /exclude_playlist_labels=none/, '索引不排除隐藏歌单，取歌也必须显式 none');
+    const artist = decodeURIComponent(/artist=([^&]*)/.exec(path)[1]);
+    if (artist !== '刘德华') return { songs: [], total: 0 };
+    return {
+      // 真实宿主 MarshalJSON 会把 url 填成 /api/v1/songs/{id}/play，可直接播
+      songs: [
+        { id: 101, title: '索引外的歌', artist: '刘德华', type: 'remote', url: '/api/v1/songs/101/play' },
+        { id: 102, title: '电台', artist: '刘德华', type: 'radio', url: '/api/v1/songs/102/play' },
+      ],
+      total: 2,
+    };
+  });
+
+  // 繁体口令也要能匹配到简体署名（归一化与索引扫描同口径）
+  const songs = await manager.resolveArtistSongs('劉德華');
+  assert.deepEqual(songs.map(song => song.id), [101], '电台不进歌手队列');
+  assert.equal(songs[0].url, '/api/v1/songs/101/play', '直链/播放地址原样带回');
+
+  // 只问了命中的那个署名，别的署名不白跑一次取歌
+  assert.deepEqual(
+    calls.filter(call => call.path.startsWith('/api/v1/songs?')).map(call => /artist=([^&]*)/.exec(call.path)[1]),
+    [encodeURIComponent('刘德华')],
+  );
+
+  await manager.resolveArtistSongs('刘德华');
+  assert.equal(
+    calls.filter(call => call.path.startsWith('/api/v1/songs/names')).length,
+    1,
+    '名录全量不分页，进程内缓存 10 分钟，不重复拉',
+  );
+});
+
+test('resolveArtistSongs：索引和名录取并集，remote 歌不会被名录链路挤掉', async () => {
+  // 主程序的 AddRemoteSongs → UpsertRemote → Create() 只写 songs 表、不写 song_artists，
+  // 所以宿主名录 / ?artist= 看不到插件导入的 remote 歌；索引扫描必须保留。
+  const remote = { id: 1, title: '独立导入的 remote 歌', artist: '刘德华', type: 'remote', url: '/api/v1/songs/1/play' };
+  const local = { id: 2, title: '本地扫描歌', artist: '刘德华', type: 'local', url: '/api/v1/songs/2/play' };
+  const manager = await createIndex([remote], new Map());
+
+  stubHostAPI((method, path) => {
+    if (path.startsWith('/api/v1/songs/names')) {
+      assert.match(path, /exclude_playlist_labels=none/, '名录也要显式不排除隐藏歌单，与索引口径一致');
+      // 新主程序artist 维度走 song_artists 关联表，返回拆开的单个歌手
+      return { field: 'artist', names: ['刘德华', '其他歌手'], total: 2 };
+    }
+    assert.match(path, /artist=/);
+    // 真实行为：remote 歌没有 song_artists 记录，宿主链路只给本地扫描歌
+    return { songs: [local], total: 1 };
+  });
+
+  const songs = await manager.resolveArtistSongs('刘德华');
+  assert.deepEqual(songs.map(song => song.id), [1, 2], 'remote 歌来自索引、本地歌来自宿主，两者都要在');
+  assert.equal(songs[0].title, remote.title, '索引结果在前（保持旧顺序），remote 歌不能被名录链路挤掉');
+});
+
+test('resolveArtistSongs：老宿主没有名录接口时落回索引扫描（含不在歌单的歌）', async () => {
+  const songs = [
+    { id: 1, title: '歌单内', artist: '刘德华', type: 'local', url: '/songs/1' },
+    { id: 2, title: '独立导入', artist: '刘德华', type: 'remote', url: '/api/v1/songs/2/play' },
+    { id: 3, title: '别人的歌', artist: '林俊杰', type: 'local', url: '/songs/3' },
+  ];
+  const manager = await createIndex(songs, new Map([[1, [songs[0]]]]));
+
+  let namesCalls = 0;
+  stubHostAPI((method, path) => {
+    if (path.startsWith('/api/v1/songs/names')) {
+      namesCalls++;
+      // 2.10.0 之前的宿主没有这条路由，gin 直接 404
+      throw new Error(`Host API error 404 GET ${path}: 404 page not found`);
+    }
+    throw new Error(`unexpected request: ${path}`);
+  });
+
+  assert.deepEqual(
+    (await manager.resolveArtistSongs('刘德华')).map(song => song.id),
+    [1, 2],
+    '回退后仍然全曲库匹配（歌单内的在前、独立导入的在后）',
+  );
+  assert.equal(namesCalls, 1);
+
+  // 404 后在冷却期内不再撞名录接口，省掉每次口令的一次失败往返
+  assert.deepEqual((await manager.resolveArtistSongs('刘德华')).map(song => song.id), [1, 2]);
+  assert.equal(namesCalls, 1, '冷却期内不重试名录接口');
+});
+
+test('resolveArtistSongs：并发冷启动只拉一次名录', async () => {
+  const manager = await createIndex([], new Map());
+  let namesCalls = 0;
+  stubHostAPI(async (method, path) => {
+    if (path.startsWith('/api/v1/songs/names')) {
+      namesCalls++;
+      // 让第一条请求悬着，第二条必然撞上「在飞」而去重
+      await new Promise(resolve => setTimeout(resolve, 5));
+      return { field: 'artist', names: ['刘德华'], total: 1 };
+    }
+    return { songs: [{ id: 7, title: '名录里的歌', artist: '刘德华', type: 'local', url: '/songs/7' }], total: 1 };
+  });
+
+  const [first, second] = await Promise.all([
+    manager.resolveArtistSongs('刘德华'),
+    manager.resolveArtistSongs('刘德华'),
+  ]);
+  assert.deepEqual(first.map(song => song.id), [7]);
+  assert.deepEqual(second.map(song => song.id), [7]);
+  assert.equal(namesCalls, 1, '并发冷启动共用同一次名录请求');
 });
 
 test('chained character variants share one search key', async () => {

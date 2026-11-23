@@ -32,6 +32,12 @@ const { IndexingManager } = loadSource('../src/indexing/manager.ts', {
     '../data/pinyin-map': loadSource('../src/data/pinyin-map.ts'),
   }),
   '../data/traditional-to-simplified-map': loadSource('../src/data/traditional-to-simplified-map.ts'),
+  // 歌手名名录走宿主 REST，本用例只关心口令路由，不需要真实 HTTP
+  '../utils/http': {
+    callHostAPI: async () => {
+      throw new Error('host API not stubbed');
+    },
+  },
 });
 const { MusicCommandService: VoiceEngine } = loadSource('../src/music/service.ts', {
   '../conversation/query': loadSource('../src/conversation/query.ts'),

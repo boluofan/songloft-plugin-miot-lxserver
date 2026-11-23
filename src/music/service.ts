@@ -1330,22 +1330,17 @@ export class MusicCommandService {
     // 「未找到该歌手的歌曲」（songloft-org/songloft-plugin-miot#62 的同源表现）。
     await this.indexingManager.waitForPlaylistCache();
 
-    // 全曲库匹配歌手：不只扫歌单歌曲缓存，索引里「不属于任何歌单」的歌（独立导入的远程歌曲、
-    // 只在曲库里的本地歌）也要算进来，否则它们会被误判成「本地没有该歌手」而白走一次在线搜索。
-    const artistLocs = this.indexingManager.findSongsByArtist(cleanArtist, { includeLibrary: true });
-    if (artistLocs.length === 0) {
-      songloft.log.warn(`[MusicCommandService] No songs found for artist: ${cleanArtist} (playlistCacheReady=${this.indexingManager.isPlaylistCacheReady()})`);
+    // 全曲库匹配歌手：优先走「宿主歌手名名录 + /songs?artist= 精确过滤」（不受 max_song_index 限制），
+    // 老宿主缺这条路由时自动退回索引扫描（歌单缓存 + 全曲库索引，含不属于任何歌单的独立导入歌）。
+    // 两条链路都没有结果才算「本地确实没这个歌手」，才去走在线搜索。
+    const fullSongs: any[] = await this.indexingManager.resolveArtistSongs(cleanArtist);
+
+    if (fullSongs.length === 0) {
+      songloft.log.warn(`[MusicCommandService] play_artist: no playable songs for "${cleanArtist}" (playlistCacheReady=${this.indexingManager.isPlaylistCacheReady()})`);
       return this.playArtistExternalFallback(cleanArtist, pm, accountId, deviceId, `未找到歌手${cleanArtist}的歌曲`);
     }
 
-    songloft.log.info(`[MusicCommandService] play_artist: found ${artistLocs.length} songs for "${cleanArtist}"`);
-
-    const fullSongs: any[] = await this.indexingManager.loadArtistSongs(artistLocs);
-
-    if (fullSongs.length === 0) {
-      songloft.log.warn(`[MusicCommandService] play_artist: no playable songs found for "${cleanArtist}"`);
-      return this.playArtistExternalFallback(cleanArtist, pm, accountId, deviceId, `加载歌手${cleanArtist}的歌曲失败，外部搜索未找到可播放歌曲`);
-    }
+    songloft.log.info(`[MusicCommandService] play_artist: found ${fullSongs.length} songs for "${cleanArtist}"`);
 
     const startIndex = Math.floor(Math.random() * fullSongs.length);
 

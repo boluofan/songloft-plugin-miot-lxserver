@@ -97,10 +97,13 @@ function fixture(t, options = {}) {
     refresh: async () => ({ success: options.ready ?? true }),
     waitForPlaylistCache: async () => true,
     isPlaylistCacheReady: () => true,
-    // 语音预览只用索引廉价近似（不额外打宿主接口），真正执行才走全曲库匹配
+    // 语音预览只用索引廉价近似（不额外打宿主接口），真正执行才走 resolveArtistSongs
     findSongsByArtist: () => options.artistLocs || [],
-    // 水合口径与真实 loadArtistSongs 一致（只留 songId 命中、且有播放地址的）
-    loadArtistSongs: async (locs) => {
+    // 歌手口令必须走全曲库链路：真实实现内部先试宿主名录（/songs/names + /songs?artist=），
+    // 不可用时回退到 includeLibrary 的索引扫描。这里按夹具给的位置直接水合成完整歌曲，
+    // 水合口径与真实 loadArtistSongs 一致（只留 songId 命中、且有播放地址的）。
+    resolveArtistSongs: async () => {
+      const locs = options.artistLocs || [];
       return (options.localSongs || []).filter(s => locs.some(l => l.songId === s.id));
     },
     findSongByName: async () => null,

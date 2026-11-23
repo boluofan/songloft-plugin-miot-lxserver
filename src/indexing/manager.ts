@@ -7,6 +7,7 @@ import { prepareSongMatch } from './song_match';
 import { segmentQuery, toPinyin } from './segmenter';
 import { traditionalToSimplifiedMap } from '../data/traditional-to-simplified-map';
 import { allSongsPlaylist, ALL_SONGS_PLAYLIST_NAME, isAllSongsPlaylist, loadAllSongs } from '../player/library_playlist';
+import { callHostAPI } from '../utils/http';
 
 // ===== 类型定义 =====
 
@@ -274,6 +275,32 @@ const STANDALONE_REFRESH_COOLDOWN_MS = 60_000;
 /** 歌单 miss 后的全量刷新冷却，避免每条未命中口令都重建索引（与独立歌曲路径对称）。 */
 const PLAYLIST_REFRESH_COOLDOWN_MS = 60_000;
 
+/**
+ * 宿主歌手名名录（GET /api/v1/songs/names?field=artist）的进程内缓存时长。
+ * 名录是全量不分页的（上万歌手约几百 KB），没必要每条歌手指令都重拉一遍。
+ */
+const ARTIST_NAMES_TTL_MS = 10 * 60_000;
+
+/**
+ * 名录接口探活失败后的冷却时间。
+ * 老宿主没有这条路由（404）或不认这个维度（400），只影响「更快更全」的那条链路，
+ * 退回索引扫描即可；冷却期内不再重复撞错，免得每条口令都白等一次失败请求。
+ */
+const ARTIST_NAMES_RETRY_MS = 10 * 60_000;
+
+/** 一次口令最多拿几个命中署名去精确取歌（「一」这类极短 query 可能匹配出上百个歌手）。 */
+const ARTIST_NAME_MAX_CANDIDATES = 8;
+
+/** 「名录 → 精确取歌」整条链路的总预算：命中的署名逐个串行取，超预算就用手上已有的。 */
+const ARTIST_RESOLVE_BUDGET_MS = 12_000;
+
+/** 名录可能较大，给宽一点；精确取歌是单条 SQL，给窄一点。 */
+const ARTIST_NAMES_TIMEOUT_MS = 15_000;
+const ARTIST_SONGS_TIMEOUT_MS = 6_000;
+
+/** /songs?artist= 的取歌上限（宿主 MaxPaginationLimit，即「一次拿全」）。 */
+const ARTIST_SONGS_PAGE_LIMIT = 100000;
+
 /** 进程内拼音缓存：跨 refresh 复用，避免同一歌手/歌名反复转拼音。 */
 const PINYIN_CACHE_LIMIT = 20000;
 
@@ -476,6 +503,14 @@ export class IndexingManager {
   private playlistCacheSignature: string = '';
   /** 加载期间又来了 refresh：跑完后补一轮，把期间的变更捡回来。 */
   private playlistCacheRevalidate: boolean = false;
+
+  // ===== 歌手名名录（两步式歌手解析的第一跳） =====
+  /** 曲库全部去重歌手名 + 预归一化键（匹配热路径复用，避免逐条 normalize）。 */
+  private artistNamesCache: { names: string[]; norm: string[]; at: number } | null = null;
+  /** 在飞的名录请求（去重用，避免并发冷启动拉两遍全量名录）。 */
+  private artistNamesPending: Promise<{ names: string[]; norm: string[] } | null> | null = null;
+  /** 上次探活失败的时间戳；0 表示还没失败过。 */
+  private artistNamesFailedAt: number = 0;
 
   constructor(configManager?: import('../config/manager').ConfigManager) {
     this.configManager = configManager ?? null;
@@ -1289,6 +1324,157 @@ export class IndexingManager {
     }
 
     return fullSongs;
+  }
+
+  // ===== 两步式歌手解析（宿主歌手名名录 → 精确取歌） =====
+
+  /**
+   * 按歌手取完整歌曲列表（全曲库，用于「播放歌手XX的歌」）。
+   *
+   * 两条链路**取并集**，缺一不可：
+   * - 索引扫描（`findSongsByArtist(includeLibrary)` + `loadArtistSongs`）：覆盖全部曲库，
+   *   尤其是插件导入的 remote 歌——宿主 `AddRemoteSongs → UpsertRemote → Create()` 只写
+   *   `songs` 表，不写 `song_artists` 关联表，下面的宿主REST链路**看不到这些歌**。
+   * - 宿主名录 + 精确取歌（宿主 ≥ 2.10.0，songloft-org/songloft#342）：补足
+   *   `max_song_index` 之外的歌；名录里是拆开的单个歌手，精确取歌按归一键命中对唱。
+   *
+   * 名录接口不可用（老宿主 404/400、网络失败、无人命中、取回 0 首）时自动退化为
+   * 只有索引扫描，行为与改造前一致。
+   */
+  async resolveArtistSongs(artistName: string, isCurrent: () => boolean = () => true): Promise<any[]> {
+    const query = (artistName || '').trim();
+    if (!query || !isCurrent()) return [];
+
+    // 基础：歌单缓存 + 全曲库索引（含不属于任何歌单的独立导入歌）。这一步不能省：
+    // 新导入的 remote 歌不在 song_artists 里，宿主名录/精确过滤查不到它们。
+    const locs = this.findSongsByArtist(query, { includeLibrary: true });
+    const fromIndex = await this.loadArtistSongs(locs, isCurrent);
+    if (!isCurrent()) return [];
+
+    // 增量：宿主名录 + 精确取歌，补索引上限之外的歌；失败/未命中自然返回空数组
+    const fromHost = await this.resolveArtistSongsFromNames(query, isCurrent);
+    if (!isCurrent()) return fromIndex;
+
+    // 按 id 去重合并：索引结果在前（保持「歌单内 → 独立导入」的旧顺序），名录增量在后
+    const seen = new Set<number>();
+    const merged: any[] = [];
+    for (const song of [...fromIndex, ...fromHost]) {
+      if (!song || typeof song.id !== 'number' || seen.has(song.id)) continue;
+      seen.add(song.id);
+      merged.push(song);
+    }
+    return merged;
+  }
+
+  /** resolveArtistSongs 的宿主增量链路；返回空数组表示这条链路没给出结果，由调用方与索引结果合并。 */
+  private async resolveArtistSongsFromNames(artistName: string, isCurrent: () => boolean): Promise<any[]> {
+    const catalog = await this.getArtistNames();
+    if (!catalog || catalog.names.length === 0 || !isCurrent()) return [];
+
+    const queryLower = normalizeForMatch(artistName);
+    if (!queryLower) return [];
+
+    // 在名录上算分：与 findSongsByArtist 的逐首比对同口径（同一归一化、同一阈值）
+    const candidates: { name: string; score: number }[] = [];
+    for (let i = 0; i < catalog.norm.length; i++) {
+      const score = fuzzyScoreLower(queryLower, catalog.norm[i]);
+      if (score >= 50) candidates.push({ name: catalog.names[i], score });
+    }
+    if (candidates.length === 0) {
+      songloft.log.info(`[IndexingManager] resolveArtistSongs: "${artistName}" not in artist catalog, index scan result will be used`);
+      return [];
+    }
+
+    // 精确/包含更紧的署名优先（sort 稳定：同分保持名录自带的名称升序）
+    candidates.sort((a, b) => b.score - a.score);
+    if (candidates.length > ARTIST_NAME_MAX_CANDIDATES) {
+      songloft.log.info(`[IndexingManager] resolveArtistSongs: "${artistName}" matched ${candidates.length} credits, capping to ${ARTIST_NAME_MAX_CANDIDATES}`);
+      candidates.length = ARTIST_NAME_MAX_CANDIDATES;
+    }
+
+    const deadline = Date.now() + ARTIST_RESOLVE_BUDGET_MS;
+    const songs: any[] = [];
+    const seen = new Set<number>();
+    for (const { name } of candidates) {
+      if (!isCurrent()) return [];
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        songloft.log.warn(`[IndexingManager] resolveArtistSongs: "${artistName}" exceeded budget, keeping ${songs.length} songs`);
+        break;
+      }
+      const rows = await this.fetchSongsByArtistName(name, Math.min(ARTIST_SONGS_TIMEOUT_MS, remaining));
+      for (const song of rows) {
+        if (!song || typeof song.id !== 'number' || seen.has(song.id)) continue;
+        // 电台与没有播放地址的条目播不了，与 loadArtistSongs 的过滤口径保持一致
+        if (song.type === 'radio' || !song.url) continue;
+        seen.add(song.id);
+        songs.push(song);
+      }
+    }
+    if (songs.length > 0) {
+      songloft.log.info(`[IndexingManager] resolveArtistSongs("${artistName}") → ${songs.length} songs via ${candidates.length} credit(s)`);
+    }
+    return songs;
+  }
+
+  /** `GET /songs?artist=<名>`：服务端精确过滤，一次拿全完整 Song（自带播放地址）。 */
+  private async fetchSongsByArtistName(name: string, timeoutMs: number): Promise<any[]> {
+    // 索引是经 SDK 的 songs.list 桥接建的，那条桥**不排除**隐藏歌单里的歌；
+    // 而 REST 列表默认排除 hidden，这里必须显式 none，否则会莫名少一批歌。
+    const path = `/api/v1/songs?artist=${encodeURIComponent(name)}`
+      + `&limit=${ARTIST_SONGS_PAGE_LIMIT}&offset=0&sort=id&order=asc&exclude_playlist_labels=none`;
+    try {
+      const page = await callHostAPI<{ songs?: any[] }>('GET', path, undefined, { timeoutMs });
+      return Array.isArray(page?.songs) ? page.songs : [];
+    } catch (e) {
+      songloft.log.warn(`[IndexingManager] songs?artist="${name}" failed: ${String(e)}`);
+      return [];
+    }
+  }
+
+  /**
+   * 曲库歌手名名录（`GET /api/v1/songs/names?field=artist&exclude_playlist_labels=none`），进程内缓存。
+   * 老宿主没有这条路由（404 / 400）时返回 null，并在冷却期内不再重试。
+   * 显式 `none`：索引走 SDK 的 songs.list 桥接不排除隐藏歌单，名录/取歌都要与之对齐。
+   */
+  private async getArtistNames(): Promise<{ names: string[]; norm: string[] } | null> {
+    const now = Date.now();
+    if (this.artistNamesCache && now - this.artistNamesCache.at < ARTIST_NAMES_TTL_MS) {
+      return this.artistNamesCache;
+    }
+    if (this.artistNamesFailedAt !== 0 && now - this.artistNamesFailedAt < ARTIST_NAMES_RETRY_MS) {
+      return null;
+    }
+    // 在飞去重：两条口令同时冷启动时别把全量名录拉两遍（QuickJS 单线程，await 处会交错）
+    if (this.artistNamesPending) return this.artistNamesPending;
+
+    const pending = this.fetchArtistNames(now);
+    this.artistNamesPending = pending;
+    try {
+      return await pending;
+    } finally {
+      this.artistNamesPending = null;
+    }
+  }
+
+  /** 真正去拉名录并写缓存；失败只记冷却时间戳，返回 null 交给调用方回退。 */
+  private async fetchArtistNames(now: number): Promise<{ names: string[]; norm: string[] } | null> {
+    try {
+      const resp = await callHostAPI<{ names?: unknown }>(
+        'GET', '/api/v1/songs/names?field=artist&exclude_playlist_labels=none', undefined, { timeoutMs: ARTIST_NAMES_TIMEOUT_MS },
+      );
+      const names = (Array.isArray(resp?.names) ? resp!.names as unknown[] : [])
+        .map(value => String(value ?? '').trim())
+        .filter(value => value.length > 0);
+      this.artistNamesCache = { names, norm: names.map(normalizeForMatch), at: now };
+      this.artistNamesFailedAt = 0;
+      return this.artistNamesCache;
+    } catch (e) {
+      this.artistNamesFailedAt = now;
+      // 老宿主缺这条路由只影响「更全」的那条链路，退回索引扫描即可，不当错误刷屏
+      songloft.log.info(`[IndexingManager] artist catalog unavailable, using index scan only: ${String(e)}`);
+      return null;
+    }
   }
 
   /** 自动续播按完整歌手名或对应的双语署名匹配，不依赖歌曲是否已加入歌单。 */

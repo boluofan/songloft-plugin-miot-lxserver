@@ -63,6 +63,15 @@ Settings → Voice → **Built-in LX Music source (lxserver)**:
 
 Both search response shapes are supported (legacy bare array and v2.1.3+ `{list,...}` object). All field mapping and compatibility fallbacks live in `src/lxserver/provider.ts`, so adapting to future server changes touches one place only.
 
+### Local matching for "play artist X"
+
+Deciding whether the local library has this artist **merges the results of two paths**; only when both come up empty does the plugin go online:
+
+1. **Index scan (mandatory base)**: scans the playlist song caches plus the whole-library in-memory index, so imported songs that belong to no playlist are still found. This step cannot be skipped: the host stores artists in a `song_artists` join table, but `POST /songs/remote` only writes the `songs` table, so remote songs imported by this plugin are invisible to the host REST path below.
+2. **Artist catalog + exact fetch (additive, host ≥ 2.10.0)**: `GET /api/v1/songs/names?field=artist&exclude_playlist_labels=none` returns every distinct artist name (cached in-process for 10 minutes); the command is matched against that catalog with the same normalization (traditional→simplified, punctuation stripped) and scoring used by the index search, and the matching names are fetched with `GET /api/v1/songs?artist=<name>&exclude_playlist_labels=none`. The catalog contains individual artists (multi-value credits are split), and the exact fetch matches by normalized key so duets are returned for either collaborator. This path covers songs beyond the index size cap.
+
+Results are merged by song id (index results first, preserving the "in playlists → standalone" order). On hosts without the catalog endpoint (404/400), or when nothing matches or the exact fetch returns nothing, the plugin naturally degrades to the index scan alone. Neither path queues radio entries or songs without a playback URL, and queue construction, random playback, and restart restoration of the temporary artist playlist are unchanged.
+
 ### Two test entry points
 
 - **Test connection** (inside the built-in source card): checks only the lxserver URL and token (health probe + token-to-username lookup).
