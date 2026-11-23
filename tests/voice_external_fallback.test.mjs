@@ -97,7 +97,12 @@ function fixture(t, options = {}) {
     refresh: async () => ({ success: options.ready ?? true }),
     waitForPlaylistCache: async () => true,
     isPlaylistCacheReady: () => true,
+    // 语音预览只用索引廉价近似（不额外打宿主接口），真正执行才走全曲库匹配
     findSongsByArtist: () => options.artistLocs || [],
+    // 水合口径与真实 loadArtistSongs 一致（只留 songId 命中、且有播放地址的）
+    loadArtistSongs: async (locs) => {
+      return (options.localSongs || []).filter(s => locs.some(l => l.songId === s.id));
+    },
     findSongByName: async () => null,
     findStandaloneSongByName: async () => null,
     findPlaylistByNameWithRefresh: async () => options.playlist || null,
@@ -205,6 +210,19 @@ test('local artist songs keep random playback without external requests', async 
   await execute(f.engine, 'play_artist', '刘德华');
   assert.deepEqual(f.requests, []);
   assert.deepEqual(f.localPlays, [[localSongs, 0, 'random', '歌手: 刘德华', '刘德华']]);
+});
+
+test('artist songs outside every playlist play locally without external search', async t => {
+  // 以解析型/直链导入的独立远程歌曲：歌手命中，但不在任何歌单里
+  const localSongs = [{ id: 9, title: '独立导入的歌', artist: '刘德华', type: 'remote', url: '/api/v1/songs/9/play' }];
+  const f = fixture(t, {
+    artistLocs: [{ playlistId: 0, songId: 9, libraryOnly: true }],
+    localSongs,
+  });
+  const played = await execute(f.engine, 'play_artist', '刘德华');
+  assert.deepEqual(f.requests, [], '本地已有该歌手，不该再去在线搜索');
+  assert.deepEqual(f.localPlays, [[localSongs, 0, 'random', '歌手: 刘德华', '刘德华']]);
+  assert.deepEqual(played, { songName: '独立导入的歌', artist: '刘德华' });
 });
 
 test('local playlist hit keeps playlist playback without external requests', async t => {

@@ -709,7 +709,7 @@ export class MusicCommandService {
       if (!(await this.indexingManager.waitForReady(INDEX_READY_WAIT_MS))) {
         return { kind: 'song', found: false, detail: '索引未就绪，无法预览搜索结果' };
       }
-      const locs = this.indexingManager.findSongsByArtist(cleanArtist);
+      const locs = this.indexingManager.findSongsByArtist(cleanArtist, { includeLibrary: true });
       if (locs.length > 0) {
         return { kind: 'song', found: true, detail: `歌手「${cleanArtist}」共 ${locs.length} 首歌曲（随机播放）` };
       }
@@ -1330,7 +1330,9 @@ export class MusicCommandService {
     // 「未找到该歌手的歌曲」（songloft-org/songloft-plugin-miot#62 的同源表现）。
     await this.indexingManager.waitForPlaylistCache();
 
-    const artistLocs = this.indexingManager.findSongsByArtist(cleanArtist);
+    // 全曲库匹配歌手：不只扫歌单歌曲缓存，索引里「不属于任何歌单」的歌（独立导入的远程歌曲、
+    // 只在曲库里的本地歌）也要算进来，否则它们会被误判成「本地没有该歌手」而白走一次在线搜索。
+    const artistLocs = this.indexingManager.findSongsByArtist(cleanArtist, { includeLibrary: true });
     if (artistLocs.length === 0) {
       songloft.log.warn(`[MusicCommandService] No songs found for artist: ${cleanArtist} (playlistCacheReady=${this.indexingManager.isPlaylistCacheReady()})`);
       return this.playArtistExternalFallback(cleanArtist, pm, accountId, deviceId, `未找到歌手${cleanArtist}的歌曲`);
@@ -1338,32 +1340,7 @@ export class MusicCommandService {
 
     songloft.log.info(`[MusicCommandService] play_artist: found ${artistLocs.length} songs for "${cleanArtist}"`);
 
-    const byPlaylist = new Map<number, Set<number>>();
-    for (const loc of artistLocs) {
-      let ids = byPlaylist.get(loc.playlistId);
-      if (!ids) {
-        ids = new Set();
-        byPlaylist.set(loc.playlistId, ids);
-      }
-      ids.add(loc.songId);
-    }
-
-    const fullSongs: any[] = [];
-    const seenIds = new Set<number>();
-    for (const [plId, songIds] of byPlaylist) {
-      try {
-        const plSongs = await songloft.playlists.getSongs(plId, { limit: 100000 });
-        if (!plSongs || !Array.isArray(plSongs)) continue;
-        for (const s of plSongs) {
-          if (songIds.has(s.id) && !seenIds.has(s.id)) {
-            seenIds.add(s.id);
-            fullSongs.push(s);
-          }
-        }
-      } catch (e) {
-        songloft.log.warn(`[MusicCommandService] play_artist: failed to load playlist ${plId}: ${String(e)}`);
-      }
-    }
+    const fullSongs: any[] = await this.indexingManager.loadArtistSongs(artistLocs);
 
     if (fullSongs.length === 0) {
       songloft.log.warn(`[MusicCommandService] play_artist: no playable songs found for "${cleanArtist}"`);

@@ -131,6 +131,68 @@ test('literal guard still rejects homophones while preserving Latin and emoji qu
   assert.deepEqual(manager.findSongsByArtist('   '), []);
 });
 
+// ===== 全曲库匹配歌手（includeLibrary） =====
+// 歌单歌曲缓存只有「属于某个歌单」的歌；以解析型/直链导入的独立远程歌曲不在任何歌单里，
+// 只用缓存匹配会把它们漏掉，导致「本地没有该歌手」→ 白跑一次在线搜索。
+
+test('全曲库匹配：不在任何歌单里的歌也能按歌手找到', async () => {
+  const songs = [
+    { id: 1, title: '歌单内', artist: '刘德华', type: 'local', url: '/songs/1' },
+    { id: 2, title: '独立导入', artist: '刘德华', type: 'remote', url: '/api/v1/songs/2/play' },
+    { id: 3, title: '别人的歌', artist: '林俊杰', type: 'local', url: '/songs/3' },
+  ];
+  // 只有 1 号在歌单里
+  const manager = await createIndex(songs, new Map([[1, [songs[0]]]]));
+
+  assert.deepEqual(
+    manager.findSongsByArtist('刘德华').map((loc) => loc.songId),
+    [1],
+    '默认仍只扫歌单缓存（老调用方不受影响）',
+  );
+
+  const all = manager.findSongsByArtist('刘德华', { includeLibrary: true });
+  assert.deepEqual(all.map((loc) => loc.songId), [1, 2]);
+  assert.equal(all[0].libraryOnly, undefined, '歌单内的不标 libraryOnly');
+  assert.equal(all[1].libraryOnly, true);
+  assert.equal(all[1].playlistId, 0, '不在歌单里用 0 表示');
+
+  assert.deepEqual(
+    (await manager.loadArtistSongs(all)).map((song) => song.id),
+    [1, 2],
+    '水合后歌单内的在前、独立导入的在后',
+  );
+});
+
+test('loadArtistSongs：跳过电台与无 url 的条目，同一首歌不重复', async () => {
+  const songs = [
+    { id: 1, title: '正常歌', artist: '刘德华', type: 'local', url: '/songs/1' },
+    { id: 2, title: '电台', artist: '刘德华', type: 'radio', url: '/api/v1/songs/2/play' },
+    { id: 3, title: '没 url', artist: '刘德华', type: 'remote', url: '' },
+  ];
+  const manager = await createIndex(songs, new Map([[1, [songs[0]]]]));
+
+  const locs = manager.findSongsByArtist('刘德华', { includeLibrary: true });
+  assert.deepEqual(locs.map((loc) => loc.songId), [1, 2, 3], '索引层不判定可播性');
+
+  const loaded = await manager.loadArtistSongs(locs);
+  assert.deepEqual(loaded.map((song) => song.id), [1], '电台和空 url 不进队列');
+});
+
+test('全曲库匹配：刚导入的歌立刻可被歌手口令命中（无需重建索引）', async () => {
+  const manager = await createIndex([], new Map());
+  manager.addImportedSong({ id: 42, title: '忘情水', artist: '刘德华' });
+  globalThis.songloft.songs.getById = async (id) => (
+    id === 42 ? { id: 42, title: '忘情水', artist: '刘德华', type: 'remote', url: '/api/v1/songs/42/play' } : null
+  );
+
+  const locs = manager.findSongsByArtist('刘德华', { includeLibrary: true });
+  assert.deepEqual(locs.map((loc) => loc.songId), [42]);
+  assert.deepEqual(
+    (await manager.loadArtistSongs(locs)).map((song) => song.id),
+    [42],
+  );
+});
+
 test('chained character variants share one search key', async () => {
   const manager = await createIndex([{ id: 1, title: '薴花', artist: '测试歌手' }]);
   for (const query of ['薴花', '苧花', '苎花']) {

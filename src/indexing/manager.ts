@@ -27,9 +27,15 @@ export interface IndexedSong {
 /** 按歌手搜索的歌曲位置信息 */
 export interface ArtistSongLocation {
   songId: number;
+  /** 歌曲所在歌单；0 表示不在任何歌单里（见 libraryOnly） */
   playlistId: number;
   songTitle: string;
   artist: string;
+  /**
+   * 该歌不在任何歌单中（独立导入的远程歌曲 / 只在曲库里的本地歌曲）。
+   * 这类位置取不到歌单上下文，只能按 id 直接读完整歌曲（loadArtistSongs 已处理）。
+   */
+  libraryOnly?: boolean;
 }
 
 /** 歌曲在歌单中的位置信息（用于语音口令播放歌曲） */
@@ -1155,10 +1161,14 @@ export class IndexingManager {
   }
 
   /**
-   * 按歌手名称模糊匹配，返回所有歌单中该歌手的歌曲位置列表。
+   * 按歌手名称模糊匹配，返回该歌手的歌曲位置列表。
    * 跨歌单去重（同一首歌只返回一次），用于"播放歌手XX的歌"语音口令。
+   *
+   * @param opts.includeLibrary 同时扫描**整个曲库索引**（`this.songs`），把不属于任何歌单的歌
+   *   （以解析型/直链方式导入的远程歌曲、只在曲库里的本地歌）也纳入，返回时标 `libraryOnly`。
+   *   默认关闭，保持「临时歌手歌单恢复」等老调用方的行为不变。
    */
-  findSongsByArtist(artistName: string): ArtistSongLocation[] {
+  findSongsByArtist(artistName: string, opts?: { includeLibrary?: boolean }): ArtistSongLocation[] {
     if (!artistName || !artistName.trim()) return [];
 
     const queryLower = normalizeForMatch(artistName);
@@ -1183,7 +1193,102 @@ export class IndexingManager {
       }
     }
 
+    if (opts?.includeLibrary) {
+      // 全曲库扫描：歌单缓存里没有的歌（尤其是不在任何歌单的独立导入歌）也要能按歌手找到。
+      // 用内存索引而不是 songs.list：索引已含 addImportedSong 增量写入的新歌，且无需再发请求。
+      for (const song of this.songs) {
+        if (seen.has(song.id)) continue;
+        const score = fuzzyScoreLower(queryLower, song.artistLower);
+        if (score >= 50) {
+          results.push({
+            songId: song.id,
+            playlistId: 0,
+            songTitle: song.title,
+            artist: song.artist,
+            libraryOnly: true,
+          });
+          seen.add(song.id);
+        }
+      }
+    }
+
     return results;
+  }
+
+  /**
+   * 把 findSongsByArtist() 的位置结果水合成完整歌曲列表：
+   * - 歌单内的：按「歌单 → 歌单内原始顺序」排布，跨歌单去重（与原逻辑一致）；
+   * - `libraryOnly` 的：按 id 直接读完整歌曲，追加在后面。
+   * 电台与没有 url 的条目跳过（播不了）。个别歌曲读取失败不阻断其余队列。
+   */
+  async loadArtistSongs(
+    locs: ArtistSongLocation[],
+    isCurrent: () => boolean = () => true,
+  ): Promise<any[]> {
+    if (!locs || locs.length === 0 || !isCurrent()) return [];
+
+    const fullSongs: any[] = [];
+    const seenIds = new Set<number>();
+
+    const byPlaylist = new Map<number, Set<number>>();
+    const libraryIds: number[] = [];
+    for (const loc of locs) {
+      if (loc.libraryOnly) {
+        libraryIds.push(loc.songId);
+        continue;
+      }
+      let ids = byPlaylist.get(loc.playlistId);
+      if (!ids) {
+        ids = new Set();
+        byPlaylist.set(loc.playlistId, ids);
+      }
+      ids.add(loc.songId);
+    }
+
+    for (const [plId, songIds] of byPlaylist) {
+      if (!isCurrent()) return [];
+      try {
+        const plSongs = await songloft.playlists.getSongs(plId, { limit: 100000 });
+        if (!Array.isArray(plSongs)) continue;
+        for (const s of plSongs) {
+          if (!songIds.has(s.id) || seenIds.has(s.id)) continue;
+          seenIds.add(s.id);
+          fullSongs.push(s);
+        }
+      } catch (e) {
+        songloft.log.warn(`[IndexingManager] loadArtistSongs: failed to load playlist ${plId}: ${String(e)}`);
+      }
+    }
+
+    const pending = libraryIds.filter((id) => !seenIds.has(id));
+    if (pending.length > 0) {
+      const loaded: any[] = new Array(pending.length);
+      let next = 0;
+      // 限制桥接并发（与 loadLibrarySongsByArtist 一致），避免一次打满宿主接口
+      await Promise.all(
+        Array.from({ length: Math.min(4, pending.length) }, async () => {
+          while (next < pending.length && isCurrent()) {
+            const index = next++;
+            const id = pending[index];
+            try {
+              const song = await songloft.songs.getById(id);
+              if (song?.url && song.type !== 'radio') loaded[index] = song;
+            } catch (e) {
+              songloft.log.warn(`[IndexingManager] loadArtistSongs: failed to read song id=${id}: ${String(e)}`);
+            }
+          }
+        }),
+      );
+      if (!isCurrent()) return [];
+      for (let i = 0; i < loaded.length; i++) {
+        const song = loaded[i];
+        if (!song || seenIds.has(song.id)) continue;
+        seenIds.add(song.id);
+        fullSongs.push(song);
+      }
+    }
+
+    return fullSongs;
   }
 
   /** 自动续播按完整歌手名或对应的双语署名匹配，不依赖歌曲是否已加入歌单。 */

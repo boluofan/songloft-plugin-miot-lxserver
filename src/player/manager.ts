@@ -451,7 +451,7 @@ export class PlaylistManager {
   private tempArtistQuery: string = ''; // 临时歌手歌单的原始搜索词，用于持久化和恢复
   private tempArtistExact = false;
   private tempStartSongId = 0;
-  // 在线歌手队列的懒解析钩子：临时队列里 url 为空的曲目在起播前调它补直链。
+  // 歌手在线歌曲的懒解析钩子：临时队列里 url 为空的曲目在起播前调它补直链。
   // 在线音源（lxserver）解析一首要 200~400ms，10 首串起来首播要等数秒，所以队列先拿
   // 元数据占位、只在临播时解析当前首（并预解析后两首）。只在 playWithSongs 的临时队列
   // 上有意义；换队列后由调用方覆盖，旧闭包对未知歌曲返回 '' 即退化为原行为。
@@ -654,7 +654,7 @@ export class PlaylistManager {
   }
 
   /**
-   * 注册「起播前补直链」的懒解析钩子（在线歌手队列用）。
+   * 注册「起播前补直链」的懒解析钩子（歌手在线歌曲用）。
    *
    * 传 null 解除。钩子只在当前曲目 `url` 为空时被调用，返回值写回 song.url 后继续正常起播；
    * 返回空串或抛错都按「这首播不了」处理，走既有的跳过/失败链路，不影响队列其余歌曲。
@@ -1882,7 +1882,7 @@ export class PlaylistManager {
 
     const song = this.songs[this.currentIndex];
 
-    // 在线歌手队列：曲目只有元数据、直链临播才解析。补不上就让后面的 buildSongURL 失败，
+    // 歌手在线歌曲：曲目只有元数据、直链临播才解析。补不上就让后面的 buildSongURL 失败，
     // 由既有的「起播失败 → 跳过下一首」链路兜住，不会卡住整队。
     if (!song.url && this.songUrlResolver) {
       const resolvedUrl = await this.songUrlResolver(song).catch((e) => {
@@ -4462,36 +4462,16 @@ export class PlaylistManagerMap {
           }
           continue;
         }
-        const artistLocs = indexingManager.findSongsByArtist(artist);
+        // 与 play_artist 保持一致：全曲库匹配（含不在任何歌单里的歌），否则重启后队列会莫名变短
+        const artistLocs = indexingManager.findSongsByArtist(artist, { includeLibrary: true });
         if (artistLocs.length === 0) {
           songloft.log.info(`[PlaylistManagerMap] restoreTempPlaylists: no songs for "${artist}", skipping`);
           (manager as any).pendingTempArtist = '';
           continue;
         }
 
-        const byPlaylist = new Map<number, Set<number>>();
-        for (const loc of artistLocs) {
-          let ids = byPlaylist.get(loc.playlistId);
-          if (!ids) { ids = new Set(); byPlaylist.set(loc.playlistId, ids); }
-          ids.add(loc.songId);
-        }
-
-        const fullSongs: any[] = [];
-        const seenIds = new Set<number>();
-        for (const [plId, songIds] of byPlaylist) {
-          try {
-            const plSongs = await songloft.playlists.getSongs(plId, { limit: 100000 });
-            if (!plSongs || !Array.isArray(plSongs)) continue;
-            for (const s of plSongs) {
-              if (songIds.has(s.id) && !seenIds.has(s.id)) {
-                seenIds.add(s.id);
-                fullSongs.push(s);
-              }
-            }
-          } catch (e) {
-            songloft.log.warn(`[PlaylistManagerMap] restoreTempPlaylists: failed to load playlist ${plId}: ${String(e)}`);
-          }
-        }
+        const fullSongs = await indexingManager.loadArtistSongs(artistLocs, isCurrent);
+        if (!isCurrent()) continue;
 
         if (fullSongs.length > 0) {
           const playMode = await this.getDevicePlayMode(manager);
