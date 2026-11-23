@@ -8,7 +8,7 @@ const load = loader({
   '../indexing/manager': {}, '../group/coordinator': {}, '../utils/http': {},
   '../types': {},
 });
-const { OnlineSearcher } = load('../src/voicecmd/online_searcher.ts');
+const { OnlineSearcher, DIRECT_URL_TTL_MS } = load('../src/voicecmd/online_searcher.ts');
 
 function lxConfig(overrides = {}) {
   return {
@@ -303,4 +303,81 @@ test('searchArtistQueue：首批直链全部解析失败时返回 null（交给�
 test('searchArtistQueue：lxserver 未启用时返回 null', async t => {
   const { searcher } = artistFixture(t, { lx: lxConfig({ enabled: false, sources: ['wy'] }) });
   assert.equal(await searcher.searchArtistQueue('邓紫棋'), null);
+});
+
+// ===== 直链 TTL =====
+// 直链是签名 CDN，解析那一刻开始倒计时。队列会预解析后续曲目，用户长时间暂停后再播
+// 就会拿到过期链接，表现为「起播失败」。所以缓存必须带时刻，过期就得重解析。
+
+/** 可控时钟：把 Date.now 往后拨，模拟「暂停了很久」 */
+function withClock(t) {
+  const realNow = Date.now.bind(Date);
+  let offset = 0;
+  const clock = t.mock.method(Date, 'now', () => realNow() + offset);
+  return {
+    advance(ms) { offset += ms; },
+    /** 时钟拨到 TTL 之后（再留 1 秒余量） */
+    expire() { offset += DIRECT_URL_TTL_MS + 1000; },
+  };
+}
+
+const urlCallCount = (requests) => requests.filter(r => r.url.includes('/api/music/url')).length;
+
+test('searchArtistQueue：TTL 未到期时命中缓存，重复取同一首不再发解析请求', async t => {
+  const clock = withClock(t);
+  const { searcher, requests } = artistFixture(t, { count: 4 });
+  const queue = await searcher.searchArtistQueue('邓紫棋');
+  assert.equal(urlCallCount(requests), 2, '预解析前 2 首');
+
+  // 播完一首歌的时间尺度内，缓存依然新鲜
+  clock.advance(DIRECT_URL_TTL_MS - 1000);
+  assert.match(queue.peekUrl(0), /歌1\.mp3$/, '未过期仍可直接起播');
+
+  // 缓存命中时 resolveOne 直接返回，连 lookahead 都不会触发
+  assert.match(await queue.resolveUrl(0), /歌1\.mp3$/);
+  await flush();
+  assert.equal(urlCallCount(requests), 2, '未过期不该重新解析');
+});
+
+test('searchArtistQueue：TTL 到期后 peekUrl 返回空，resolveUrl 重新解析拿新直链', async t => {
+  const clock = withClock(t);
+  // 每次解析给不同 URL，才能确认拿到的是「新」链接而不是旧缓存
+  let seq = 0;
+  const { searcher, requests } = artistFixture(t, {
+    count: 4,
+    urlHandler: (url, init) => {
+      seq += 1;
+      const body = JSON.parse(init?.body || '{}');
+      return jsonResp({ url: `https://audio.test/${body.songInfo?.name || 'x'}-${seq}.mp3`, type: '320k' });
+    },
+  });
+  const queue = await searcher.searchArtistQueue('邓紫棋');
+  const first = queue.peekUrl(0);
+  assert.match(first, /歌1-1\.mp3$/, '首批解析到的是第一版链接');
+  assert.equal(urlCallCount(requests), 2);
+
+  clock.expire();
+  assert.equal(queue.peekUrl(0), '', '过期后不该再把旧链接交出去');
+  assert.equal(queue.peekUrl(1), '', '同一批预解析的其它曲目一起过期');
+
+  const refreshed = await queue.resolveUrl(0);
+  assert.ok(refreshed && refreshed !== first, '过期后必须重新解析');
+  assert.match(refreshed, /歌1-3\.mp3$/, '拿到的是新签的链接');
+  assert.equal(queue.peekUrl(0), refreshed, '新链接写回缓存');
+  assert.ok(urlCallCount(requests) > 2, '确实重新发了 /api/music/url');
+});
+
+test('searchArtistQueue：TTL 到期不会误伤未解析的曲目（仍按需解析一次）', async t => {
+  const clock = withClock(t);
+  const { searcher, requests } = artistFixture(t, { count: 6 });
+  const queue = await searcher.searchArtistQueue('邓紫棋');
+  assert.equal(queue.peekUrl(4), '', '第 5 首本来就没解析');
+
+  clock.expire();
+  const fifth = await queue.resolveUrl(4);
+  assert.match(fifth, /歌5\.mp3$/);
+  await flush();
+  // 第 5 首自身 + lookahead 第 6 首（第 7 首越界不计）
+  assert.equal(urlCallCount(requests), 2 + 2, '只解析未解析过的曲目，不会把整队重刷一遍');
+  assert.match(queue.peekUrl(5), /歌6\.mp3$/, '第 6 首由 lookahead 顺手预热');
 });

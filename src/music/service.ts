@@ -1528,8 +1528,10 @@ export class MusicCommandService {
         album: item.album || '',
         duration: item.duration || 0,
         cover_url: item.cover_url || '',
-        // 首批已解析的带上直链，起播不必等钩子；其余留空由钩子临播补。
-        url: queue.peekUrl(index),
+        // 曲目一律留空，起播时才向钩子取 URL：直链有签名时效（DIRECT_URL_TTL_MS），
+        // 若在这里就把预解析的直链写死，用户中途长时间暂停后再播就会拿到过期链接。
+        // 已解析过的首曲在钩子里是 Map 命中，不额外发请求，起播延迟可忽略。
+        url: '',
         type: 'remote',
       };
       indexOf.set(song, index);

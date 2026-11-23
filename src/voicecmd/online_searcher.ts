@@ -115,6 +115,15 @@ interface RemoteSongsResponse {
 }
 
 /**
+ * 直推模式的直链缓存有效期。
+ *
+ * 直链是签名 CDN，解析那一刻开始倒计时（通常几分钟到半小时）。队列预解析 + lookahead 会把
+ * 后几首的直链提前拿到手，若用户中途长时间暂停再恢复，手里那条可能已经过期，表现为「起播失败」。
+ * 5 分钟是个保守值：既避免每次起播都重新解析，又不至于拿着将死的链接去播。
+ */
+export const DIRECT_URL_TTL_MS = 5 * 60_000;
+
+/**
  * 外部源「按引用重搜」的总预算。
  *
  * 和内置源的解析预算对齐（宿主给 /music/url 的调度预算 30s，留 5s 余量）：QuickJS 是单线程
@@ -416,21 +425,28 @@ export class OnlineSearcher {
     }
     if (!queue || queue.items.length === 0) return null;
 
-    // 已解析好的「音箱可播 URL」缓存（直链 → 必要时转码代理），避免重复解析/重复转码。
-    const resolved = new Map<number, string>();
+    // 已解析好的「音箱可播 URL」缓存（直链 → 必要时转码代理）+ 解析时刻。
+    // 带时刻是因为直链有签名有效期：过期后必须重解析，否则拿将死的链接去播必然失败。
+    const resolved = new Map<number, { url: string; at: number }>();
+    const freshUrl = (index: number): string => {
+      const entry = resolved.get(index);
+      return entry && Date.now() - entry.at < DIRECT_URL_TTL_MS ? entry.url : '';
+    };
     const inflight = new Map<number, Promise<string>>();
     // 不递归的 lookahead：解析 i 时预解析 i+1/i+2，但那两首不再继续往后推。
     const resolveOne = async (index: number, lookahead: boolean): Promise<string> => {
       if (index < 0 || index >= queue.items.length) return '';
-      const cached = resolved.get(index);
+      const cached = freshUrl(index);
       if (cached) return cached;
       let pending = inflight.get(index);
       if (!pending) {
         pending = (async () => {
           const item = queue.items[index];
-          const playable = item.playable ?? (item.playable = await provider.resolveTrackUrl(item.track));
+          // 缓存的直链可能已过期，但曲目元数据（raw songInfo）可复用，只需重新解析直链。
+          const playable = await provider.resolveTrackUrl(item.track);
+          item.playable = playable;
           const pushUrl = await this.resolveDirectPushUrl(playable.url, item.track.duration);
-          resolved.set(index, pushUrl);
+          resolved.set(index, { url: pushUrl, at: Date.now() });
           return pushUrl;
         })().finally(() => inflight.delete(index));
         inflight.set(index, pending);
@@ -450,7 +466,7 @@ export class OnlineSearcher {
           if (!item.playable) return;
           try {
             const pushUrl = await this.resolveDirectPushUrl(item.playable.url, item.track.duration);
-            if (pushUrl) resolved.set(index, pushUrl);
+            if (pushUrl) resolved.set(index, { url: pushUrl, at: Date.now() });
           } catch { /* 单首失败不影响队列 */ }
         }),
       );
@@ -458,6 +474,7 @@ export class OnlineSearcher {
       if (resolved.size === 0) {
         songloft.log.warn('[OnlineSearcher] lxserver artist queue: no playable url after pre-resolve');
         return null;
+      }
     }
 
     const items: OnlineSearchResult[] = queue.items.map((item) => ({
@@ -482,7 +499,7 @@ export class OnlineSearcher {
       total: queue.total,
       mode: importMode ? 'import' : 'push',
       items,
-      peekUrl: (index: number) => resolved.get(index) || '',
+      peekUrl: (index: number) => freshUrl(index),
       resolveUrl: (index: number) => (importMode ? Promise.resolve('') : resolveOne(index, true)),
     };
   }
