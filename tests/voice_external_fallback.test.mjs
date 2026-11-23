@@ -127,7 +127,7 @@ for (const [action, name] of [['play_artist', '刘德华'], ['play_playlist', '�
         for (const r of searches) assert.deepEqual(r.body, { keyword: name, quality: '320k' });
         assert.equal(f.requests.filter(r => r.url.endsWith('/songs/remote')).length, 1);
         assert.deepEqual(f.pushes, []);
-        assert.deepEqual(f.queuePlays, [{ ...song, id: 42, url: '/api/v1/songs/42/play', type: 'remote' }]);
+        assert.deepEqual(f.queuePlays, [{ ...song, hit_source: 'topone', id: 42, url: '/api/v1/songs/42/play', type: 'remote' }]);
         assert.deepEqual(f.speech, []);
         assert.equal(f.events.filter(e => e === 'prepare').length, 1);
         assert.equal(f.events.filter(e => e === 'stop').length, 1);

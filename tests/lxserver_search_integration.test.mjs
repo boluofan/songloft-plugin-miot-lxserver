@@ -142,3 +142,42 @@ test('isExternalSearchConfigured：都未配置返回 false', async t => {
   });
   assert.equal(await searcher.isExternalSearchConfigured(), false);
 });
+
+test('hint 仅给歌手名时也能命中歌手匹配的候选', async t => {
+  const { searcher } = fixture(t, {
+    handler: (url) => {
+      if (url.includes('/api/music/search')) return jsonResp([lxSong({ songmid: '9', name: '唯一', singer: 'G.E.M.邓紫棋' })]);
+      if (url.includes('/api/music/url')) return jsonResp({ url: 'https://audio.test/u.mp3', type: '320k' });
+      return jsonResp([]);
+    },
+  });
+  const result = await searcher.search('邓紫棋', { title: '邓紫棋' });
+  assert.ok(result, '单独歌手名应能命中歌手字段');
+  assert.equal(result.title, '唯一');
+  assert.equal(result.artist, 'G.E.M.邓紫棋');
+});
+
+test('searchWithDiagnosis：区分 lxserver 无候选与候选被阈值过滤', async t => {
+  const { searcher } = fixture(t, {
+    handler: (url) => {
+      if (url.includes('/api/music/search')) return jsonResp([]);
+      return jsonResp([]);
+    },
+  });
+  const missed = await searcher.searchWithDiagnosis('邓紫棋', { title: '邓紫棋' });
+  assert.equal(missed.result, null);
+  assert.match(missed.reason, /未返回候选/);
+});
+
+test('searchWithDiagnosis：候选存在但不匹配时说明匹配度不足', async t => {
+  const { searcher } = fixture(t, {
+    handler: (url) => {
+      if (url.includes('/api/music/search')) return jsonResp([lxSong({ name: '晴天', singer: '周杰伦' })]);
+      if (url.includes('/api/music/url')) return jsonResp({ url: 'https://audio.test/q.mp3', type: '320k' });
+      return jsonResp([]);
+    },
+  });
+  const missed = await searcher.searchWithDiagnosis('稻香', { title: '稻香' });
+  assert.equal(missed.result, null);
+  assert.match(missed.reason, /匹配度不足/);
+});

@@ -12,6 +12,7 @@ import { GroupCoordinator } from '../group/coordinator';
 import type { ExternalSearchSource } from '../types';
 import type { PlaylistManager } from '../player/manager';
 import { LxServerProvider } from '../lxserver/provider';
+import type { LXMissReason } from '../lxserver/provider';
 import { normalizeLXServerConfig } from '../lxserver/types';
 
 // 外部搜索 API 请求体
@@ -36,6 +37,12 @@ export interface OnlineSearchResult {
   lyric_source?: string;
   /** 命中来源：内置 lxserver / 外部 topone（供设置页测试展示，播放链路忽略） */
   hit_source?: 'lxserver' | 'topone';
+}
+
+/** 设置页测试用：搜索结果与未命中原因（命中时 reason 为空） */
+export interface OnlineSearchDiagnosis {
+  result: OnlineSearchResult | null;
+  reason: string;
 }
 
 // 外部搜索 API 响应
@@ -257,6 +264,47 @@ export class OnlineSearcher {
     }
     songloft.log.warn('[OnlineSearcher] No source matched for keyword: ' + keyword);
     return null;
+  }
+
+  /**
+   * 与 search() 完全相同的搜索，但额外给出未命中原因，供设置页测试展示。
+   * 不改动 search() 的签名，播放链路不受影响。
+   */
+  async searchWithDiagnosis(
+    keyword: string,
+    hint: { title: string; artist?: string; duration?: number } | null,
+  ): Promise<OnlineSearchDiagnosis> {
+    if (!keyword || !keyword.trim()) return { result: null, reason: '未命中：关键词为空' };
+    const result = await this.search(keyword, hint);
+    if (result) return { result, reason: '' };
+    return { result: null, reason: await this.describeMiss() };
+  }
+
+  /** 读取各源最近一次未命中状态，拼成用户可读的原因 */
+  private async describeMiss(): Promise<string> {
+    const lxProvider = await this.getLxProvider();
+    const lxPart = this.describeLxMiss(lxProvider ? lxProvider.getLastMissReason() : null);
+    const sources = await this.getEnabledSources();
+    if (sources.length === 0) {
+      return lxPart ? `未命中：${lxPart}` : '未命中：没有可用的在线搜索源返回结果，或关键词无匹配';
+    }
+    const topPart = '外部 topone 源未命中';
+    return lxPart ? `未命中：${lxPart}；${topPart}` : `未命中：${topPart}`;
+  }
+
+  private describeLxMiss(reason: LXMissReason): string {
+    switch (reason) {
+      case 'no_candidates':
+        return '内置 lxserver 未返回候选（它按歌曲名搜索，单独歌手名可能搜不到）';
+      case 'below_threshold':
+        return '内置 lxserver 返回了候选，但与关键词匹配度不足';
+      case 'no_playable_url':
+        return '内置 lxserver 找到歌曲但直链解析失败';
+      case 'error':
+        return '内置 lxserver 搜索出错';
+      default:
+        return '';
+    }
   }
 
   /**

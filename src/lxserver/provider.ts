@@ -31,13 +31,16 @@ function includesLoose(actual: string, expected: string): boolean {
   return a.includes(e) || e.includes(a);
 }
 
-/** 候选匹配打分：优先歌名+歌手都吻合，其次仅歌名吻合；时长接近加分 */
+/** 候选匹配打分：优先歌名+歌手都吻合，其次仅歌名/仅歌手吻合；时长接近加分 */
 function matchScore(track: LXTrack, hint: LXSearchHint | null): number {
   if (!hint) return 50;
   let score = 0;
   const titleHit = includesLoose(track.name, hint.title);
+  // hint 没给 artist 时，关键词本身可能是歌手名（设置页测试/语音歌手兜底）。
+  // 这时歌手字段也应算命中，否则「邓紫棋」会因歌名「唯一」不匹配而被阈值过滤。
+  const singerAsTitleHit = !hint.artist && includesLoose(track.singer, hint.title);
   const artistHit = hint.artist ? includesLoose(track.singer, hint.artist) : false;
-  if (titleHit) score += 40;
+  if (titleHit || singerAsTitleHit) score += 40;
   if (artistHit) score += 40;
   if (hint.artist && titleHit && !artistHit) score -= 20; // 明确给了歌手却对不上，重罚
   if (hint.duration && hint.duration > 0 && track.duration > 0) {
@@ -48,13 +51,22 @@ function matchScore(track: LXTrack, hint: LXSearchHint | null): number {
   return score;
 }
 
+/** 未命中原因：供设置页测试区分「源没结果」与「候选被过滤」 */
+export type LXMissReason = 'no_candidates' | 'below_threshold' | 'no_playable_url' | 'error' | null;
+
 /** 直链可播性：音箱（player_play_url）只可靠播放 mp3；其余交给播放链路的转码代理。
  *  这里保留原样 URL，由 playSearchResult → resolveDirectPushUrl 统一处理转码。 */
 export class LxServerProvider {
   private client: LxServerClient;
+  private lastMissReason: LXMissReason = null;
 
   constructor(private cfg: LXServerConfig) {
     this.client = new LxServerClient(cfg);
+  }
+
+  /** 最近一次 search() 未命中的原因；命中或不可用时为 null */
+  getLastMissReason(): LXMissReason {
+    return this.lastMissReason;
   }
 
   /** 是否可用（配置了地址且启用） */
@@ -70,6 +82,7 @@ export class LxServerProvider {
 
   /** 搜索并返回最佳候选：多源并发 → hint 打分排序 → 逐个解析直链 → 首个可播即返回 */
   async search(keyword: string, hint: LXSearchHint | null): Promise<OnlineSearchResult | null> {
+    this.lastMissReason = null;
     if (!this.isConfigured()) return null;
     const clean = keyword.replace(/\s+/g, ' ').trim();
     if (!clean) return null;
@@ -83,10 +96,12 @@ export class LxServerProvider {
         tracks = await this.client.searchAggregate(hint.title);
       }
     } catch (e) {
+      this.lastMissReason = 'error';
       songloft.log.warn('[LxServerProvider] search failed: ' + String(e));
       return null;
     }
     if (tracks.length === 0) {
+      this.lastMissReason = 'no_candidates';
       songloft.log.info('[LxServerProvider] no candidates for: ' + clean);
       return null;
     }
@@ -100,6 +115,7 @@ export class LxServerProvider {
     const threshold = hint ? 40 : 0;
     const candidates = ranked.filter((r) => r.score >= threshold).slice(0, 8);
     if (candidates.length === 0) {
+      this.lastMissReason = 'below_threshold';
       songloft.log.info('[LxServerProvider] all candidates below threshold for: ' + clean);
       return null;
     }
@@ -131,6 +147,7 @@ export class LxServerProvider {
         );
       }
     }
+    this.lastMissReason = 'no_playable_url';
     songloft.log.warn('[LxServerProvider] no playable url for: ' + clean);
     return null;
   }

@@ -567,7 +567,7 @@ export function registerConfigHandlers(
   });
 
   // POST /online-search/test - 统一的在线搜索测试入口。
-  // 调用与语音点歌完全相同的 OnlineSearcher.search()，不区分内置 lxserver / 外部 topone 源，
+  // 调用与语音点歌相同的 OnlineSearcher 搜索链路（附带未命中原因），不区分内置 lxserver / 外部 topone 源，
   // 只返回命中候选，不导入、不播放。让用户测的就是真实点歌用的在线搜索能力。
   router.post('/online-search/test', async (req: HTTPRequest) => {
     try {
@@ -578,11 +578,11 @@ export function registerConfigHandlers(
       }
       const searcher = new OnlineSearcher(configManager);
       // hint 用关键词本身，让内置 lxserver 的匹配打分与外部源行为尽量贴近真实点歌
-      const result = await searcher.search(keyword, { title: keyword });
+      const { result, reason } = await searcher.searchWithDiagnosis(keyword, { title: keyword });
       if (!result) {
         return jsonResponse({
           success: true,
-          data: { hit: false, message: '未命中：没有可用的在线搜索源返回结果，或关键词无匹配' },
+          data: { hit: false, message: reason },
         });
       }
       return jsonResponse({
