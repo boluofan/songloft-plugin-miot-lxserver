@@ -298,7 +298,7 @@ export class OnlineSearcher {
     const timeoutMs = timeoutSec * 1000;
 
     // 立即并发派发所有源；searchOne 内部 catch，绝不 reject
-    const tasks = sources.map((s) => this.searchOne(s, keyword, hint, timeoutMs));
+    const tasks = sources.map((s) => this.searchOne(s, keyword, hint, timeoutMs, config.external_search_no_import));
 
     // 按优先级顺序消费：命中即返回（只等到该源），未命中再看下一个
     for (let i = 0; i < tasks.length; i++) {
@@ -380,7 +380,8 @@ export class OnlineSearcher {
     for (const source of ordered) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
-      const hit = await this.searchOne(source, keyword, hint, Math.min(timeoutSec * 1000, remaining));
+      // 按引用重搜的唯一目的就是拿直链，必须让源端解析（noImport=false）
+      const hit = await this.searchOne(source, keyword, hint, Math.min(timeoutSec * 1000, remaining), false);
       const url = (hit?.url || '').trim();
       if (url.startsWith('http://') || url.startsWith('https://')) {
         if (this.sourceIdOf(source) !== ref.source_id) {
@@ -554,6 +555,7 @@ export class OnlineSearcher {
     keyword: string,
     hint: { title: string; artist?: string; duration?: number } | null,
     timeoutMs: number,
+    noImport: boolean,
   ): Promise<OnlineSearchResult | null> {
     const reqBody: SearchOneRequest = {
       keyword,
@@ -591,7 +593,11 @@ export class OnlineSearcher {
           songloft.log.info('[OnlineSearcher] [Diag] Request POST ' + baseUrl + ' body=' + JSON.stringify(body));
           const fetchResp = await fetch(baseUrl, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: authToken },
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: authToken,
+              ...(!noImport && { 'X-Songloft-Resolve-Url': 'false' }),
+            },
             body: JSON.stringify(body),
           });
           if (finished) return null;
