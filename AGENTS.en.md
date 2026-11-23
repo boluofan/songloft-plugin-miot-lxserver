@@ -22,7 +22,7 @@ This is the development entry point for `songloft-org/songloft-plugin-miot`, cov
 
 ## Validation commands
 
-Releases are tag-driven, see [releases](docs/en/releases.md): the version is semver and matches the tag exactly (`1.1.0` ↔ `v1.1.0`), and `npm run release` bumps patch by default (`--minor` / `--major` to advance deliberately), commits, tags and pushes; CI verifies the tag matches the manifest, runs type checks, tests, build and package validation, creates the Release, then backfills download URL, update URL and package hashes to the default branch. Branch pushes never publish. Changing the release scripts requires `node --test tests/release_version.test.mjs`.
+Releases are tag-driven, see [releases](docs/en/releases.md): the version is semver and matches the tag exactly (`1.1.0` ↔ `v1.1.0`), and `npm run release` bumps patch by default (`--minor` / `--major` to advance deliberately), commits, tags and pushes; CI verifies the tag matches the manifest, runs type checks, tests, build and package validation, creates the Release, then backfills download URL, update URL and package hashes to the default branch. Branch pushes never publish. Release notes are grouped from commit subjects by `scripts/release-notes.mjs`, so **commit subjects are their only source** — keep writing `type(scope): description`; `npm run release:notes -- --tag v1.1.2` previews them locally. Changing the release scripts requires `node --test tests/release_version.test.mjs tests/release_notes.test.mjs`.
 
 Run in this repository:
 

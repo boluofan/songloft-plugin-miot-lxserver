@@ -22,7 +22,7 @@
 
 ## 验证命令
 
-发布由 tag 驱动，见 [发布](docs/releases.md)：版本是 semver、与 tag 完全一致（`1.1.0` ↔ `v1.1.0`），`npm run release` 默认 patch 自增（`--minor` / `--major` 可主动进位）、提交、打 tag 并推送，CI 校验版本与 tag 对齐后跑类型检查、测试、构建与包校验并创建 Release，再把下载地址、更新地址与包哈希回写默认分支；分支推送不发版。更改发布脚本时运行 `node --test tests/release_version.test.mjs`。
+发布由 tag 驱动，见 [发布](docs/releases.md)：版本是 semver、与 tag 完全一致（`1.1.0` ↔ `v1.1.0`），`npm run release` 默认 patch 自增（`--minor` / `--major` 可主动进位）、提交、打 tag 并推送，CI 校验版本与 tag 对齐后跑类型检查、测试、构建与包校验并创建 Release，再把下载地址、更新地址与包哈希回写默认分支；分支推送不发版。Release 正文由 `scripts/release-notes.mjs` 按 Conventional Commits 分组生成，**提交信息就是更新说明的唯一来源**，照 `type(scope): 中文描述` 写；`npm run release:notes -- --tag v1.1.2` 可本地预览。更改发布脚本时运行 `node --test tests/release_version.test.mjs tests/release_notes.test.mjs`。
 
 在本仓库执行：
 
