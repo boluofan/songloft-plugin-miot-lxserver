@@ -486,6 +486,10 @@ export class OnlineSearcher {
       cover_url: item.track.cover || undefined,
       dedup_key: `lxserver:${item.track.source}:${item.track.id}`,
       // 一律带完整引用：'push' 模式用不上，但 'import' 模式靠它代替直链入库。
+      // plugin_entry_path 必须和 source_data 同时给：宿主只认「url 或 (entryPath + source_data)」，
+      // 少一个就整批 400（「第 1 条:必须提供 url 或 (plugin_entry_path + source_data)」），
+      // 歌手队列会因此整体退回单曲搜索。
+      plugin_entry_path: PLUGIN_ENTRY_PATH,
       source_data: buildSongRef(item.track, item.playable?.type),
       hit_source: 'lxserver',
     }));

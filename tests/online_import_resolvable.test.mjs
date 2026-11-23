@@ -58,6 +58,15 @@ function fixture(t, { lx = lxConfig(), noImport = false, imported = { id: 9 }, e
       // 模拟唯一键冲突：宿主判定这首歌已存在，不回新行
       if (emptyImport) return jsonResp({ count: 0, songs: [] });
       const body = JSON.parse(init.body);
+      // 照宿主 internal/handlers/music.go 的校验来：只认「url」或「plugin_entry_path + source_data」，
+      // 缺一个就整批 400。fixture 太宽松会让「漏传 plugin_entry_path」这类 bug 一路溜到线上。
+      const invalid = body.findIndex(item => item.url === '' && !(item.plugin_entry_path && item.source_data));
+      if (invalid >= 0) {
+        return jsonResp(
+          { error: `第 ${invalid + 1} 条:必须提供 url 或 (plugin_entry_path + source_data)` },
+          400,
+        );
+      }
       return jsonResp({
         count: body.length,
         songs: body.map((item, i) => ({
@@ -167,11 +176,18 @@ test('歌手队列入库模式：整队带引用返回，完全不解析直链',
   assert.equal(queue.items.length, 5);
   assert.equal(requests.filter(r => r.url.includes('/api/music/url')).length, 0, '入库模式不需要任何直链');
   assert.equal(queue.items[0].url, undefined);
+  // 宿主只认「url 或 (plugin_entry_path + source_data)」；只给 source_data 会让整批 400，
+  // 歌手队列因此整体失败并退化成单曲搜索（用户侧表现就是「只播了一首歌」）。
+  assert.equal(queue.items[0].plugin_entry_path, PLUGIN_ENTRY_PATH, '队列项必须带 entryPath');
+  assert.ok(queue.items[0].source_data, '队列项必须带引用');
 
   // importSongs 一次批量写入，而不是 5 次单条导入
   const imported = await searcher.importSongs(queue.items);
+  assert.ok(imported, '整批入库不应被宿主拒绝');
   assert.equal(imported.length, 5);
-  assert.equal(remoteBody(requests).length, 5);
+  const body = remoteBody(requests);
+  assert.equal(body.length, 5);
+  assert.deepEqual(body.map(item => item.plugin_entry_path), Array(5).fill(PLUGIN_ENTRY_PATH));
   assert.deepEqual(imported.map(r => r.id), [9, 10, 11, 12, 13]);
 });
 
