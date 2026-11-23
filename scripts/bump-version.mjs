@@ -64,13 +64,20 @@ const tag = `v${version}`;
 
 console.log(`分支        ${branch}`);
 console.log(`当前版本    ${currentVersion}`);
-console.log(`新版本      ${version}${forced ? '（--version 指定）' : `（${bump} 进位）`}`);
+console.log(`新版本      ${version}${forced ? '（--version 指定）' : version === currentVersion ? '（清单版本尚未发布）' : `（${bump} 进位）`}`);
 // 只按 tag 判重：清单版本还没发过时，本次发的就是它本身，不能当「未变化」拒掉。
 if (tags.includes(tag)) throw new Error(`${tag} 已存在；要重发请先删除该 tag（含远端）再跑`);
 
+// 首发（清单版本还没 tag）时版本号不会变，写文件没有差异，不能白跑一次 commit。
+const versionChanged = version !== currentVersion;
+
 if (dryRun) {
-  console.log('\n[dry-run] 将更新 package.json / plugin.json');
-  console.log(`[dry-run] git commit -m "chore(release): bump to ${tag}"`);
+  if (versionChanged) {
+    console.log('\n[dry-run] 将更新 package.json / plugin.json');
+    console.log(`[dry-run] git commit -m "chore(release): bump to ${tag}"`);
+  } else {
+    console.log('\n[dry-run] 版本号不变，跳过改文件与提交');
+  }
   console.log(`[dry-run] git tag -a ${tag} -m "Release version ${version}"`);
   console.log(`[dry-run] git push origin HEAD:${branch} --follow-tags`);
   process.exit(0);
@@ -83,7 +90,12 @@ for (const file of ['package.json', 'plugin.json']) {
 }
 
 git('add', 'package.json', 'plugin.json');
-git('commit', '-m', `chore(release): bump to ${tag}`);
+// 用暂存区是否为空决定提交，比只看 version 更准：手工只改了一个文件也能兜住。
+if (git('diff', '--cached', '--name-only')) {
+  git('commit', '-m', `chore(release): bump to ${tag}`);
+} else {
+  console.log('版本号无变化，跳过提交（清单版本还没对应的 tag，本次直接打 tag）。');
+}
 git('tag', '-a', tag, '-m', `Release version ${version}`);
 
 if (push) {
