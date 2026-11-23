@@ -12,3 +12,6 @@ static/*
 !static/icon.svg
 !static/material-icons.LICENSE
 pnpm-lock.yaml
+
+# 工作记忆只在本地留存；.workbuddy/skills 是项目级 skill，需要入库。
+.workbuddy/memory/
