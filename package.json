@@ -10,6 +10,7 @@
     "dev": "songloft-plugin dev",
     "validate": "songloft-plugin validate",
     "release": "node scripts/bump-version.mjs",
+    "release:notes": "node scripts/release-notes.mjs",
     "publish:release": "songloft-plugin publish",
     "fetch:holidays": "node scripts/fetch-holidays.mjs",
     "build:pinyin": "node scripts/build-pinyin-data.mjs",

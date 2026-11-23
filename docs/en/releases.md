@@ -33,10 +33,47 @@ A dirty work tree is refused: the package is built from the tagged commit, so un
 3. `npm ci` (including `frontend/`) and both `tsc --noEmit` passes;
 4. the full plugin suite `node --experimental-strip-types --test tests/*.test.mjs` plus frontend tests;
 5. `npm run build` and `npm run validate`;
-6. `gh release create`, uploading `dist/miot.jsplugin.zip` with GitHub-generated notes;
+6. generate the release notes and `gh release create`, uploading `dist/miot.jsplugin.zip`;
 7. backfill `download_url`, `updateUrl`, `entryHash`, `zipHash` and `releaseSource` into `plugin.json` on the default branch (`lxserver`) and commit.
 
 Step 7 only fills in what exists after publication; the version was already bumped inside the tag. `updateUrl` points at this repository's default branch, so in-app updates pull this project's package instead of falling back to upstream. `releaseSource` records the commit a package was built from and is written by CI (upstream's equivalent workflow does the same); skipping it would leave upstream's stale SHA in place.
+
+## Release notes
+
+Step 6 does not use GitHub's auto-generated "What's Changed". `scripts/release-notes.mjs` collects the commits between the **previous tag and the current tag** and groups them by Conventional Commits type.
+
+```markdown
+## 更新内容
+
+### ✨ 新功能
+
+- `voice`: 加口令 ([ccc3333](https://github.com/…/commit/ccc3333))
+
+### 🐛 修复
+
+- `search`: 入库模式允许播放时解析外部音源 ([6e89a24](https://github.com/…/commit/6e89a24))
+
+---
+
+**完整对比**：[v1.1.1...v1.1.2](https://github.com/…/compare/v1.1.1...v1.1.2)
+```
+
+Rules:
+
+- Fixed section order: 💥 breaking → ✨ features → 🐛 fixes → ⚡ performance → ♻️ refactor → 📝 docs → 📦 build → 🤖 CI → ✅ tests → 🎨 style → 🔧 chore → ⏪ revert → 📌 other. Newest commit first within a section.
+- `chore(release)` is omitted: it only touches version numbers and is itself part of the batch being published.
+- Unrecognised types (e.g. `wip:`) and subjects that do not match `type(scope): description` land in "other" rather than being dropped.
+- "Previous tag" is the greatest semver tag **numerically lower** than the current one — not the last entry of `git tag --sort=creatordate`, which would pick a newer tag when republishing an older one and reverse the changelog range.
+- The first release has no previous tag, so the range starts at the repository's first commit.
+- A failing script never blocks the release: CI falls back to `--generate-notes` and still publishes the package.
+- Commit subjects are therefore the only source of the notes — keep writing them as `type(scope): description`.
+
+Preview locally (no publication, no network):
+
+```bash
+npm run release:notes -- --tag v1.1.2     # notes for v1.1.1..v1.1.2
+npm run release:notes                     # omit --tag to use the tag on HEAD
+```
 
 `main` is only an upstream mirror maintained through GitHub Sync fork: it neither publishes nor receives release metadata.
 
@@ -57,6 +94,7 @@ Step 7 only fills in what exists after publication; the version was already bump
 
 ```bash
 node --test tests/release_version.test.mjs   # version and tag rules
+node --test tests/release_notes.test.mjs     # release note grouping and range
 ```
 
-Those cases cover patch/minor/major bumps, the first semver release not skipping a number, tags leading the manifest, the explicit error for non-semver manifests, and accepted tag shapes. They touch neither the network nor any repository.
+The first group covers patch/minor/major bumps, the first semver release not skipping a number, tags leading the manifest, the explicit error for non-semver manifests, and accepted tag shapes. The second covers section order, filtering out release commits, breaking changes on top, and range selection when republishing an older tag. Neither touches the network or publishes anything.

@@ -4,6 +4,10 @@ name: Release Plugin
 # 本工作流只响应 v* tag —— 校验清单版本与 tag 对齐，跑完类型检查/测试/构建/包校验后创建 Release，
 # 最后把 download_url、updateUrl 与包哈希回写到默认分支（lxserver）。分支推送不打包、不发版。
 #
+# Release 正文由 scripts/release-notes.mjs 生成：取「上一版 tag..本次 tag」的提交，
+# 按 Conventional Commits 类型分组（新功能/修复/性能…），比 GitHub 的 --generate-notes
+# 更贴合本仓库的中文提交习惯；脚本失败时退回 --generate-notes，不阻断发布。
+#
 # workflow_dispatch 是备用入口：fork 仓库的 Actions 若被禁用，tag 推送不会产生任何运行，
 # 启用后可以拿已存在的 tag 手动补一次，不必删 tag 重推。
 on:
@@ -33,6 +37,8 @@ jobs:
         with:
           # 手动触发时切到指定 tag，push 触发时 github.ref 就是该 tag。
           ref: ${{ inputs.tag || github.ref }}
+          # 生成更新说明要读历史提交和全部 tag，浅克隆只有一个提交、也拿不到上一版 tag。
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -79,13 +85,38 @@ jobs:
           npm run build
           npm run validate
 
+      - name: Generate release notes
+        id: notes
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
+          # 生成失败不让发布挂掉：退回 GitHub 自动生成的说明，包本身照发。
+          if node scripts/release-notes.mjs \
+            --tag "${TAG}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --output "${NOTES_FILE}"; then
+            echo "notes_file=${NOTES_FILE}" >> "$GITHUB_OUTPUT"
+            echo '--- 生成的更新说明 ---'
+            cat "${NOTES_FILE}"
+          else
+            echo "::warning::生成更新说明失败，本次使用 GitHub 自动生成的说明"
+          fi
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NOTES_FILE: ${{ steps.notes.outputs.notes_file }}
         run: |
           TAG="${{ steps.version.outputs.tag }}"
           ENTRY_PATH=$(node -p "require('./plugin.json').entryPath")
-          gh release create "${TAG}" "dist/${ENTRY_PATH}.jsplugin.zip" --title "${TAG}" --generate-notes
+          ASSET="dist/${ENTRY_PATH}.jsplugin.zip"
+          # --notes-file 与 --generate-notes 互斥，二选一。
+          if [ -n "${NOTES_FILE}" ] && [ -s "${NOTES_FILE}" ]; then
+            gh release create "${TAG}" "${ASSET}" --title "${TAG}" --notes-file "${NOTES_FILE}"
+          else
+            gh release create "${TAG}" "${ASSET}" --title "${TAG}" --generate-notes
+          fi
 
       - name: Backfill manifest to default branch
         env:

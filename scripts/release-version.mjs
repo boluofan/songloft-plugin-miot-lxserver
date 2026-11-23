@@ -14,7 +14,8 @@ export function parseVersion(version) {
 
 export const formatVersion = parts => parts.join('.');
 
-function compare(a, b) {
+// 按段比数值；a>b 返回正数，a<b 返回负数，相等返回 0。release-notes.mjs 选「上一版 tag」也用它。
+export function compareVersions(a, b) {
   for (let i = 0; i < 3; i += 1) if (a[i] !== b[i]) return a[i] - b[i];
   return 0;
 }
@@ -27,12 +28,12 @@ export function nextVersion(tags, currentVersion, bump = 'patch') {
   }
 
   const released = tags.map(parseVersion).filter(Boolean);
-  const max = released.reduce((best, item) => (compare(item, best) > 0 ? item : best), current);
-  const currentReleased = released.some(item => compare(item, current) === 0);
+  const max = released.reduce((best, item) => (compareVersions(item, best) > 0 ? item : best), current);
+  const currentReleased = released.some(item => compareVersions(item, current) === 0);
 
   // 清单版本还没对应的 tag（首次改用 semver，或手工调过版本）时，本次就发它本身，
   // 否则首发会变成 1.1.1，凭空跳掉一个号。
-  if (!currentReleased && compare(max, current) === 0) return formatVersion(current);
+  if (!currentReleased && compareVersions(max, current) === 0) return formatVersion(current);
 
   const [major, minor, patch] = max;
   if (bump === 'major') return `${major + 1}.0.0`;

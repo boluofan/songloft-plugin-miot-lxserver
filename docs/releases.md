@@ -33,10 +33,47 @@ npm run release -- --version 1.2.0         # 指定版本（重发或补号用�
 3. `npm ci`（含 `frontend/`）、两层 `tsc --noEmit`；
 4. 插件全量测试 `node --experimental-strip-types --test tests/*.test.mjs` 与前端测试；
 5. `npm run build` + `npm run validate`；
-6. `gh release create` 上传 `dist/miot.jsplugin.zip`，说明由 GitHub 自动生成；
+6. 生成更新说明并 `gh release create` 上传 `dist/miot.jsplugin.zip`；
 7. 把 `download_url`、`updateUrl`、`entryHash`、`zipHash`、`releaseSource` 回写到默认分支（`lxserver`）的 `plugin.json` 并提交。
 
 第 7 步只补发布后才存在的信息，版本号在 tag 里已经改过。`updateUrl` 指向本仓库默认分支，插件自更新取的是本项目的包，不会回落到上游。`releaseSource` 记该包的构建提交，由 CI 写入（上游同名流程也是自己写），不写会一直留着上游的旧 SHA。
+
+## Release 正文（更新说明）
+
+第 6 步的正文不是 GitHub 自动拼的英文 "What's Changed"，而是 `scripts/release-notes.mjs` 生成的：取**上一版 tag..本次 tag** 之间的提交，按 Conventional Commits 类型分组。
+
+```markdown
+## 更新内容
+
+### ✨ 新功能
+
+- `voice`: 加口令 ([ccc3333](https://github.com/…/commit/ccc3333))
+
+### 🐛 修复
+
+- `search`: 入库模式允许播放时解析外部音源 ([6e89a24](https://github.com/…/commit/6e89a24))
+
+---
+
+**完整对比**：[v1.1.1...v1.1.2](https://github.com/…/compare/v1.1.1...v1.1.2)
+```
+
+规则：
+
+- 分组顺序固定：💥 不兼容变更 → ✨ 新功能 → 🐛 修复 → ⚡ 性能 → ♻️ 重构 → 📝 文档 → 📦 构建 → 🤖 持续集成 → ✅ 测试 → 🎨 代码风格 → 🔧 杂项 → ⏪ 回滚 → 📌 其他。组内按提交时间倒序。
+- `chore(release)` 不列出：改的只是版本号，而且它自己就在被发布的这批提交里。
+- 类型不在表内的提交（如 `wip:`）落到「其他」，不会被丢掉；不符合 `type(scope): 描述` 格式的同样归到「其他」。
+- 「上一版 tag」按 **semver 数值**取严格小于本次的最大者，不用 `git tag --sort=creatordate` 取末尾——手动补发某个旧 tag 时，时间序会取到比它新的 tag，changelog 范围就反了。
+- 首个版本没有上一版，范围从仓库首个提交算起。
+- CI 里脚本失败不会阻断发布：`--generate-notes` 兜底，包照发。
+- 因此**提交信息要按约定写**（`feat(scope): 中文描述`），这是更新说明唯一的信息来源。
+
+本地预览（不发布、不联网）：
+
+```bash
+npm run release:notes -- --tag v1.1.2     # 打印 v1.1.1..v1.1.2 的更新说明
+npm run release:notes                     # 省略 --tag 时取当前 HEAD 上的 tag
+```
 
 `main` 只作上游镜像（通过 GitHub Sync fork 维护），不参与发布，也不接受发布元数据提交。
 
@@ -57,6 +94,7 @@ npm run release -- --version 1.2.0         # 指定版本（重发或补号用�
 
 ```bash
 node --test tests/release_version.test.mjs   # 版本号与 tag 规则
+node --test tests/release_notes.test.mjs     # Release 正文的分组与范围
 ```
 
-patch/minor/major 进位、首发不跳号、tag 领先时倒挂、非 semver 报错、tag 格式这些规则由这组用例覆盖，测试不访问网络也不会发布。
+patch/minor/major 进位、首发不跳号、tag 领先时倒挂、非 semver 报错、tag 格式这些规则由第一组用例覆盖；分组顺序、发版提交过滤、破坏性变更置顶、补发旧 tag 时的范围选择由第二组覆盖。测试不访问网络也不会发布。
