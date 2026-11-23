@@ -353,7 +353,7 @@ export class OnlineSearcher {
   ): Promise<boolean> {
     const config = await this.configManager.getConfig();
 
-    // 不入库直接播放：仅对「直链型」结果生效（song.url 是 http(s) 直链）。
+    // 直链不入库直接播放：仅对「直链型」结果生效（song.url 是 http(s) 直链）。
     // 临时链接（签名 CDN 直链）入库后很快失效、堆成死条目，此模式趁链接新鲜时把原始 URL
     // 直接推给音箱（底层 player_play_url），跳过入库/追加歌单/加索引。
     // 解析型结果（url 为空、靠 plugin_entry_path 让宿主运行时解析）无法脱离曲库播放，回退到入库。

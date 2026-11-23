@@ -1863,7 +1863,7 @@ export default function VoiceSettings(props: any) {
               </NativeView>
               <NativeView className="field setting-field-control">
                 <NativeView className="field-label">
-                  <text>不入库直接播放</text>
+                  <text>直链不入库直接播放</text>
                 </NativeView>
                 <SlSwitch
                   modelValue={vm.state.config.external_search_no_import}
@@ -1871,38 +1871,43 @@ export default function VoiceSettings(props: any) {
                     vm.setSwitch('external_search_no_import', $event);
                   }}
                 ></SlSwitch>
+                <NativeView className="field-help">
+                  <text>默认关闭，开启后仅对直链生效——不入库、直接推给音箱（适合会过期的临时链接，避免曲库堆积失效条目），因此不适合追加歌单。解析型结果不受影响，仍会入库。</text>
+                </NativeView>
               </NativeView>
             </NativeView>
-            <NativeView className="field-grid">
-              <NativeView className="field setting-field-control">
-                <NativeView className="field-label">
-                  <text>自动追加到歌单</text>
-                </NativeView>
-                <SlSwitch
-                  modelValue={vm.appendPlaylistEnabled}
-                  onUpdateModelValue={($event: any) => {
-                    void vm.setAppendPlaylistEnabled($event);
-                  }}
-                ></SlSwitch>
-              </NativeView>
-              {vm.appendPlaylistEnabled ? (
-                <NativeView className="field">
+            {!vm.state.config.external_search_no_import ? (
+              <NativeView className="field-grid">
+                <NativeView className="field setting-field-control">
                   <NativeView className="field-label">
-                    <text>目标歌单</text>
+                    <text>追加到歌单</text>
                   </NativeView>
-                  <SlSelect
-                    modelValue={vm.state.config.external_search_playlist_id}
-                    options={vm.playlistOptions}
-                    searchable
-                    searchPlaceholder="搜索歌单"
-                    aria-label="目标歌单"
+                  <SlSwitch
+                    modelValue={vm.appendPlaylistEnabled}
                     onUpdateModelValue={($event: any) => {
-                      void vm.setAppendPlaylistId($event);
+                      void vm.setAppendPlaylistEnabled($event);
                     }}
-                  ></SlSelect>
+                  ></SlSwitch>
                 </NativeView>
-              ) : null}
-            </NativeView>
+                {vm.appendPlaylistEnabled ? (
+                  <NativeView className="field">
+                    <NativeView className="field-label">
+                      <text>目标歌单</text>
+                    </NativeView>
+                    <SlSelect
+                      modelValue={vm.state.config.external_search_playlist_id}
+                      options={vm.playlistOptions}
+                      searchable
+                      searchPlaceholder="搜索歌单"
+                      aria-label="目标歌单"
+                      onUpdateModelValue={($event: any) => {
+                        void vm.setAppendPlaylistId($event);
+                      }}
+                    ></SlSelect>
+                  </NativeView>
+                ) : null}
+              </NativeView>
+            ) : null}
           </NativeView>
         </SectionCard>
         <SectionCard

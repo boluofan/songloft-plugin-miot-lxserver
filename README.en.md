@@ -23,7 +23,7 @@ Update the matching server and Lynx client together. Older GET/POST-only bridges
 
 ## Description
 
-This repository provides a smart-speaker integration example and host SDK scaffolding. It does not bundle third-party device protocols or account systems; users are responsible for compliant integration.
+A smart-speaker control plugin with a built-in LX Music (lxserver) online search client. It does not bundle third-party device protocols or account systems; users are responsible for compliant integration.
 
 ## Device groups (multiple rooms)
 
@@ -45,6 +45,35 @@ Weekly schedules support three modes:
 - Actual working days: skip public holidays and include officially reassigned weekend workdays.
 
 Data comes from MIT-licensed [NateScarlet/holiday-cn](https://github.com/NateScarlet/holiday-cn). The `prebuild` hook downloads the current and following year through jsDelivr/GitHub raw and compiles data into the bundle. Runtime access is offline. Before next year's official announcement, empty data means ordinary-day handling, and holiday-only rules do not run. Update regularly for new arrangements. Committed data permits offline builds.
+
+## Online search and built-in LX Music (lxserver)
+
+When a voice request misses the local library, miot runs an online search. The plugin ships with a **native, built-in** lxserver (LX Music sync server) client: search and direct-URL resolution both happen in-process, with no relay plugin required. On a miss or error it falls back to the user's external topone sources, which remain fully supported.
+
+### Configuration
+
+Settings → Voice → **Built-in LX Music source (lxserver)**:
+
+- **Enable switch**: opt in to built-in search (off by default).
+- **Server URL**: e.g. `https://lx.example.com:9527`.
+- **User token**: optional (`lx_tk_...`). The plugin resolves the username through `/api/user/auth/verify` and authenticates with a paired `x-user-name` + `x-user-token`; leaving it empty means anonymous access to public sources only.
+- **Default quality**: `320k` (default) / `flac` / `128k`; URL resolution degrades through `flac → 320k → 128k`.
+- **Sources**: kw / kg / tx / wy / mg searched concurrently, ranked and deduplicated by match score.
+
+Both search response shapes are supported (legacy bare array and v2.1.3+ `{list,...}` object). All field mapping and compatibility fallbacks live in `src/lxserver/provider.ts`, so adapting to future server changes touches one place only.
+
+### Two test entry points
+
+- **Test connection** (inside the built-in source card): checks only the lxserver URL and token (health probe + token-to-username lookup).
+- **Online search test**: runs the exact same search path as voice playback. It takes only a keyword and does not care whether the hit comes from the built-in or an external source; the output reports the hit source (`Built-in lxserver` / `External topone`).
+
+### Common online-search settings
+
+Search priority, match threshold, timeout, **direct-link play without import**, and auto-append to playlist apply to **both** built-in and external sources.
+
+- **Direct-link play without import** (off by default): when on, results with an http(s) direct URL are pushed straight to the speaker instead of being added to the library — useful for short-lived signed CDN links that would otherwise pile up as dead entries. The auto-append group is hidden while this is on, because appending requires a library song id (the setting is preserved and returns when switched off). Resolution-type results (no direct URL, resolved by the host at playback time) are unaffected and are still imported. With the switch off, online songs are imported normally, can be appended to a playlist, and continue playing automatically.
+
+> The first release covers online search and direct-link playback only. Lyrics, playlist reading, AI recommendations and multi-user / per-room playlists are not implemented yet; extension points are reserved.
 
 ## Releases
 
