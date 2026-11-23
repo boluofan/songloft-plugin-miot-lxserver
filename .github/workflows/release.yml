@@ -1,40 +1,26 @@
 name: Release Plugin
 
+# 发版流程与 mimusic-jsplugin-audiobook 一致：`npm run release` 会改版本、提交、打 tag 并推送；
+# 本工作流只响应 v* tag —— 校验清单版本与 tag 对齐，跑完类型检查/测试/构建/包校验后创建 Release，
+# 最后把 download_url、updateUrl 与包哈希回写到默认分支（lxserver）。分支推送不打包、不发版。
 on:
   push:
-    branches: [main]
-    paths-ignore:
-      - '**/*.md'
-      - '**/*.mdx'
-      - 'docs/**'
-  workflow_dispatch:
+    tags: ['v*']
 
 permissions:
   contents: write
 
-# 排队并逐一补发未处理的业务提交，避免连续推送或批量推送丢包。
 concurrency:
-  group: release-plugin
-  queue: max
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   release:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 40
     steps:
-      - name: Checkout plugin
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          path: plugins/src/miot
-          fetch-depth: 0
-
-      - name: Checkout SDK source for contract tests
-        uses: actions/checkout@v4
-        with:
-          repository: songloft-org/plugin-toolchain
-          path: plugins/toolchain
-          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -42,12 +28,84 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: |
-            plugins/src/miot/package-lock.json
-            plugins/src/miot/frontend/package-lock.json
+            package-lock.json
+            frontend/package-lock.json
 
-      - name: Build, verify and publish each pending commit
-        working-directory: plugins/src/miot
+      - name: Verify version matches tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          PKG_VER=$(node -p "require('./plugin.json').version")
+          if [ "$PKG_VER" != "$VERSION" ]; then
+            echo "❌ plugin.json version=$PKG_VER does not match tag=$VERSION"
+            exit 1
+          fi
+          echo "✅ version aligned at $VERSION"
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm ci --prefix frontend
+
+      - name: Type check
+        run: |
+          npx tsc --noEmit
+          npm run typecheck --prefix frontend
+
+      - name: Test
+        run: |
+          node --experimental-strip-types --test $(git ls-files 'tests/*.test.mjs')
+          npm test --prefix frontend
+
+      - name: Build and validate
+        run: |
+          npm run build
+          npm run validate
+
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PLUGIN_TOOLCHAIN_PATH: ${{ github.workspace }}/plugins/toolchain
-        run: node scripts/release-plugin.mjs
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          ENTRY_PATH=$(node -p "require('./plugin.json').entryPath")
+          gh release create "${TAG}" "dist/${ENTRY_PATH}.jsplugin.zip" --title "${TAG}" --generate-notes
+
+      - name: Backfill manifest to default branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ github.event.repository.default_branch }}
+          SHA: ${{ github.sha }}
+        run: |
+          # 版本号已经在 tag 提交里改过了，这里只补发布后才有的东西：下载地址、更新地址、包哈希、
+          # releaseSource（这个包由哪个提交构建，在上游是 CI 自己写的）。
+          # 更新地址指向本仓库默认分支，插件自更新才会取本项目的包，不会回落到上游。
+          TAG="${{ steps.version.outputs.tag }}"
+          ENTRY_PATH=$(node -p "require('./plugin.json').entryPath")
+          export DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ENTRY_PATH}.jsplugin.zip"
+          export UPDATE_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${BRANCH}/plugin.json"
+          export ENTRY_HASH=$(node -p "require('./dist/_build/plugin.json').entryHash || ''")
+          export ZIP_HASH=$(node -p "require('./dist/_build/plugin.json').zipHash || ''")
+
+          node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('plugin.json', 'utf-8'));
+            p.download_url = process.env.DOWNLOAD_URL;
+            p.updateUrl = process.env.UPDATE_URL;
+            if (process.env.ENTRY_HASH) p.entryHash = process.env.ENTRY_HASH;
+            if (process.env.ZIP_HASH) p.zipHash = process.env.ZIP_HASH;
+            if (process.env.SHA) p.releaseSource = process.env.SHA;
+            fs.writeFileSync('plugin.json', JSON.stringify(p, null, 2) + '\n');
+          "
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add plugin.json
+          if git diff --staged --quiet; then
+            echo "ℹ️ manifest 已是最新，无需回写"
+          else
+            git commit -m "chore(release): backfill manifest for ${TAG}"
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${BRANCH}"
+          fi

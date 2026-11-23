@@ -9,6 +9,7 @@
     "predev": "node scripts/fetch-holidays.mjs && node scripts/build-pinyin-data.mjs && node scripts/build-chinese-data.mjs",
     "dev": "songloft-plugin dev",
     "validate": "songloft-plugin validate",
+    "release": "node scripts/bump-version.mjs",
     "publish:release": "songloft-plugin publish",
     "fetch:holidays": "node scripts/fetch-holidays.mjs",
     "build:pinyin": "node scripts/build-pinyin-data.mjs",
