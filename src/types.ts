@@ -207,6 +207,20 @@ export interface PluginConfig {
   hourly_chime_resume_enabled?: boolean; // 整点报时后续播，默认关闭
   max_song_index: number;
   ai_config: AIConfig;
+  /** 内置 lxserver 搜索源配置（独立于 topone 外部源通道） */
+  lxserver: LXServerSettings;
+}
+
+/** 内置 lxserver 配置（结构定义在 types.ts 以避免与 PluginConfig 循环依赖） */
+export interface LXServerSettings {
+  enabled: boolean;
+  host: string;
+  token: string;
+  quality: '128k' | '320k' | 'flac';
+  allowQualityFallback: boolean;
+  sources: string[];
+  searchTimeout: number;
+  urlTimeout: number;
 }
 
 // ===== 定时任务 =====

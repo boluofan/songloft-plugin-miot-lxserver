@@ -11,6 +11,8 @@ import { IndexingManager } from '../indexing/manager';
 import { GroupCoordinator } from '../group/coordinator';
 import type { ExternalSearchSource } from '../types';
 import type { PlaylistManager } from '../player/manager';
+import { LxServerProvider } from '../lxserver/provider';
+import { normalizeLXServerConfig } from '../lxserver/types';
 
 // 外部搜索 API 请求体
 interface SearchOneRequest {
@@ -32,6 +34,8 @@ export interface OnlineSearchResult {
   dedup_key?: string;
   lyric?: string;
   lyric_source?: string;
+  /** 命中来源：内置 lxserver / 外部 topone（供设置页测试展示，播放链路忽略） */
+  hit_source?: 'lxserver' | 'topone';
 }
 
 // 外部搜索 API 响应
@@ -82,6 +86,9 @@ interface RemoteSongsResponse {
 export class OnlineSearcher {
   private configManager: ConfigManager;
   private groupCoordinator?: GroupCoordinator;
+  /** 内置 lxserver provider 缓存：按配置签名重建，保留鉴权缓存（authUser/authPending） */
+  private lxProvider?: LxServerProvider;
+  private lxProviderSig = '';
 
   constructor(configManager: ConfigManager, groupCoordinator?: GroupCoordinator) {
     this.configManager = configManager;
@@ -89,9 +96,27 @@ export class OnlineSearcher {
   }
 
   /**
-   * 检查是否配置了外部搜索源（总开关开启且至少有一个启用且有 url 的源）
+   * 获取内置 lxserver provider（配置变化时重建实例）。
+   * 注意：一个 token 一个实例，authUser/authPending 是实例私有状态，配置未变时必须复用。
+   */
+  private async getLxProvider(): Promise<LxServerProvider | null> {
+    const config = await this.configManager.getConfig();
+    const lx = normalizeLXServerConfig(config.lxserver);
+    if (!lx.enabled || !lx.host.trim()) return null;
+    const sig = [lx.host, lx.token, lx.quality, lx.allowQualityFallback, lx.sources.join(','), lx.searchTimeout, lx.urlTimeout].join('|');
+    if (!this.lxProvider || this.lxProviderSig !== sig) {
+      this.lxProvider = new LxServerProvider(lx);
+      this.lxProviderSig = sig;
+    }
+    return this.lxProvider;
+  }
+
+  /**
+   * 检查是否配置了在线搜索源：内置 lxserver 或 topone 外部源任一可用即可。
    */
   async isExternalSearchConfigured(): Promise<boolean> {
+    const lx = await this.getLxProvider();
+    if (lx && lx.isConfigured()) return true;
     const sources = await this.getEnabledSources();
     return sources.length > 0;
   }
@@ -197,6 +222,21 @@ export class OnlineSearcher {
     keyword = normalize(keyword);
     if (!keyword) return null;
     hint = hint ? { ...hint, title: normalize(hint.title), ...(hint.artist !== undefined ? { artist: normalize(hint.artist) } : {}) } : null;
+
+    // 内置 lxserver 优先：作为默认在线搜索接口，命中即返回；失败/未命中继续 topone 外部源。
+    const lxProvider = await this.getLxProvider();
+    if (lxProvider && lxProvider.isConfigured()) {
+      try {
+        const lxResult = await lxProvider.search(keyword, hint);
+        if (lxResult) {
+          songloft.log.info('[OnlineSearcher] Hit from built-in lxserver for keyword: ' + keyword);
+          return { ...lxResult, hit_source: 'lxserver' };
+        }
+      } catch (e) {
+        songloft.log.warn('[OnlineSearcher] built-in lxserver search error: ' + String(e));
+      }
+    }
+
     const sources = await this.getEnabledSources();
     if (sources.length === 0) return null;
 
@@ -212,7 +252,7 @@ export class OnlineSearcher {
       const r = await tasks[i];
       if (r) {
         songloft.log.info(`[OnlineSearcher] Hit from source[${i}] "${sources[i].name || sources[i].url}" for keyword: ${keyword}`);
-        return r;
+        return { ...r, hit_source: 'topone' };
       }
     }
     songloft.log.warn('[OnlineSearcher] No source matched for keyword: ' + keyword);

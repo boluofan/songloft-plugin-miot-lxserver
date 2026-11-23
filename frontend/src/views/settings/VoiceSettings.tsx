@@ -45,6 +45,7 @@ import {
   state,
 } from '../../store';
 import type {
+  LXServerConfig,
   MemoryEntity,
   SearchSource,
   SelectOption,
@@ -188,8 +189,9 @@ const pageState = {
     const commandTestResult = ref('');
     const commandTestSuccess = ref(false);
     const commandTestBusy = ref(false);
-    const sourceTestQuery = ref('');
-    const sourceTestResult = ref('');
+    const onlineSearchQuery = ref('');
+    const onlineSearchResult = ref('');
+    const lxserverTestResult = ref('');
     const selectedProviderId = ref('');
     const newSourceName = ref('');
     const newSourceUrl = ref('');
@@ -717,27 +719,45 @@ const pageState = {
       await saveConfig({ external_search_sources: sources });
       notify('外部搜索源已保存', 'success');
     }
-    async function testSource(): Promise<void> {
-      if (!sourceTestQuery.value.trim()) return;
-      const source = state.config.external_search_sources.find(
-        (item) => item.enabled,
-      );
-      if (!source) {
-        sourceTestResult.value = '没有启用的搜索源';
+    async function testOnlineSearch(): Promise<void> {
+      const keyword = onlineSearchQuery.value.trim();
+      if (!keyword) {
+        onlineSearchResult.value = '请输入测试关键词';
         return;
       }
       try {
-        sourceTestResult.value = JSON.stringify(
-          await post('/search-providers/test', {
-            keyword: sourceTestQuery.value.trim(),
-            source_id: source.id,
-          }),
-          null,
-          2,
+        // 统一的在线搜索测试：走真实点歌所用的同一条搜索链路，
+        // 不区分内置 lxserver / 外部 topone 源。
+        const data = await post<{ hit?: boolean; source?: string; title?: string; artist?: string; album?: string; duration?: number; hasUrl?: boolean; message?: string }>(
+          '/online-search/test',
+          { keyword },
         );
+        onlineSearchResult.value = data?.hit
+          ? `命中来源：${data.source || '未知'}\n` +
+            `歌曲：${data.title || ''}${data.artist ? ' - ' + data.artist : ''}` +
+            (data.album ? `\n专辑：${data.album}` : '') +
+            (data.duration ? `\n时长：${data.duration} 秒` : '') +
+            `\n直链：${data.hasUrl ? '有' : '无（将由播放链路解析）'}`
+          : data?.message || '未命中';
       } catch (error) {
-        sourceTestResult.value = messageOf(error);
+        onlineSearchResult.value = messageOf(error);
       }
+    }
+    async function testLxServer(): Promise<void> {
+      lxserverTestResult.value = '测试中...';
+      try {
+        // post() 内部已 unwrap：成功拿到的就是后端的 data ({ ok, detail })；
+        // 失败（success:false / HTTP 502）时 unwrap 会抛 ApiError，走 catch 显示真实原因。
+        const data = await post<{ ok?: boolean; detail?: string }>('/lxserver/test', {
+          lxserver: { ...state.config.lxserver },
+        });
+        lxserverTestResult.value = data?.detail || (data?.ok ? '连接成功' : '连接失败');
+      } catch (error) {
+        lxserverTestResult.value = messageOf(error);
+      }
+    }
+    function saveLxserver(patch: Partial<LXServerConfig>): void {
+      void saveConfig({ lxserver: { ...state.config.lxserver, ...patch } });
     }
     async function refreshSearchProviders(): Promise<void> {
       await loadSearchProviders();
@@ -820,8 +840,9 @@ const pageState = {
       commandTestResult,
       commandTestSuccess,
       commandTestBusy,
-      sourceTestQuery,
-      sourceTestResult,
+      onlineSearchQuery,
+      onlineSearchResult,
+      lxserverTestResult,
       selectedProviderId,
       newSourceName,
       newSourceUrl,
@@ -876,7 +897,9 @@ const pageState = {
       addSource,
       removeSource,
       saveSources,
-      testSource,
+      testOnlineSearch,
+      testLxServer,
+      saveLxserver,
       refreshSearchProviders,
       memoryAliases,
       deleteMemoryEntity,
@@ -1730,36 +1753,38 @@ export default function VoiceSettings(props: any) {
         data-voice-panel="intelligence"
       >
         <SectionCard
-          title="歌曲搜索"
-          icon="search"
-          description="本地与外部候选按匹配阈值筛选，再按搜索优先级选择。"
+          title="在线搜索通用设置"
+          icon="tune"
+          description="对内置 lxserver 与外部搜索源同时生效：搜索测试、匹配阈值、优先级、播放与入库策略。"
         >
-          <SettingRow
-            title="启用外部搜索"
-            subtitle={
-              vm.state.config.voice_command_enabled
-                ? '搜索源需要返回 topone 格式结果'
-                : '需要先开启语音口令'
-            }
-          >
-            <SlSwitch
-              aria-label="启用外部搜索"
-              modelValue={vm.state.config.external_search_enabled}
-              disabled={!vm.state.config.voice_command_enabled}
-              onUpdateModelValue={($event: any) => {
-                void vm.setExternalSearchEnabled($event);
-              }}
-            ></SlSwitch>
-          </SettingRow>
-          {!vm.state.config.voice_command_enabled ? (
-            <NativeView className="dependency-hint">
-              <SlIcon name="warning" size={18}></SlIcon>
-              <NativeView>
-                <text>需要先开启"语音口令"才能使用外部搜索。</text>
-              </NativeView>
-            </NativeView>
-          ) : null}
           <NativeView className="form-body">
+            <NativeView className="field">
+              <NativeView className="field-label"><text>在线搜索测试</text></NativeView>
+              <NativeView className="inline-fields">
+                <SlInput
+                    modelValue={vm.onlineSearchQuery}
+                    onUpdateModelValue={($event: any) => {
+                      vm.onlineSearchQuery = $event;
+                    }}
+                    placeholder="例如：晴天 周杰伦"
+                    onSubmit={() => {
+                      void vm.testOnlineSearch();
+                    }}
+                ></SlInput>
+                <SlButton
+                    variant="outlined"
+                    label="测试"
+                    onClick={() => {
+                      void vm.testOnlineSearch();
+                    }}
+                ></SlButton>
+              </NativeView>
+              {vm.onlineSearchResult ? (
+                  <NativeView className="result-pre">
+                    <text>{displayText(vm.onlineSearchResult)}</text>
+                  </NativeView>
+              ) : null}
+            </NativeView>
             <NativeView className="field">
               <NativeView className="field-label">
                 <text>搜索优先级</text>
@@ -1775,6 +1800,9 @@ export default function VoiceSettings(props: any) {
                   });
                 }}
               ></SlSelect>
+              <NativeView className="field-help">
+                <text>本地与在线候选如何取舍：并行按匹配度择优、本地优先、或在线源优先。</text>
+              </NativeView>
             </NativeView>
             <NativeView className="field">
               <NativeView className="field-label">
@@ -1803,7 +1831,7 @@ export default function VoiceSettings(props: any) {
               <NativeView className="field-help">
                 <text>
                   默认 70，越高越严格；支持同音字与中阿数字容错，无需开启
-                  AI。本地与外部歌曲都须达标；并行搜索等待两端后按匹配度选择，同分优先本地。该分数不是命中概率。
+                  AI。本地与在线歌曲都须达标；并行搜索等待两端后按匹配度选择，同分优先本地。该分数不是命中概率。
                 </text>
               </NativeView>
             </NativeView>
@@ -1875,6 +1903,116 @@ export default function VoiceSettings(props: any) {
                 </NativeView>
               ) : null}
             </NativeView>
+          </NativeView>
+        </SectionCard>
+        <SectionCard
+          title="内置洛雪音乐源（lxserver）"
+          icon="cloud"
+          description="插件原生对接 lxserver 搜索与直链解析，无需额外中转插件。"
+        >
+          <SettingRow
+            title="启用内置 lxserver"
+            subtitle="开启后在语音点歌时优先使用 lxserver 搜索（外部搜索源作为回退）"
+          >
+            <SlSwitch
+              aria-label="启用内置 lxserver"
+              modelValue={vm.state.config.lxserver.enabled}
+              onUpdateModelValue={($event: any) => {
+                vm.saveLxserver({ enabled: !!$event });
+              }}
+            ></SlSwitch>
+          </SettingRow>
+          <NativeView className="form-body">
+            <NativeView className="field">
+              <NativeView className="field-label"><text>服务地址</text></NativeView>
+              <SlInput
+                modelValue={vm.state.config.lxserver.host}
+                onUpdateModelValue={($event: any) => {
+                  vm.saveLxserver({ host: String($event) });
+                }}
+                placeholder="http://192.168.1.10:9527"
+              ></SlInput>
+            </NativeView>
+            <NativeView className="field">
+              <NativeView className="field-label">
+                <text>用户 Token（可选，lx_tk_...）</text>
+              </NativeView>
+              <SlInput
+                modelValue={vm.state.config.lxserver.token}
+                onUpdateModelValue={($event: any) => {
+                  vm.saveLxserver({ token: String($event) });
+                }}
+                type="password"
+                placeholder="留空则匿名，仅公开音源可用"
+              ></SlInput>
+            </NativeView>
+            <NativeView className="field">
+              <NativeView className="field-label"><text>默认音质</text></NativeView>
+              <SlSelect
+                modelValue={vm.state.config.lxserver.quality}
+                options={[
+                  { label: '320k（推荐）', value: '320k' },
+                  { label: 'FLAC 无损', value: 'flac' },
+                  { label: '128k', value: '128k' },
+                ]}
+                aria-label="默认音质"
+                onUpdateModelValue={($event: any) => {
+                  vm.saveLxserver({ quality: $event as '320k' | 'flac' | '128k' });
+                }}
+              ></SlSelect>
+            </NativeView>
+            <NativeView className="field">
+              <NativeView className="field-label"><text>搜索音源</text></NativeView>
+              <text>kw, kg, tx, wy, mg（全部并发搜索，按顺序去重）</text>
+            </NativeView>
+            <NativeView className="field-actions">
+              <SlButton
+                variant="outlined"
+                label="测试连接"
+                icon="wifi"
+                onClick={($event: any) => {
+                  void vm.testLxServer();
+                }}
+              ></SlButton>
+            </NativeView>
+            {vm.lxserverTestResult ? (
+              <NativeView className="result-pre">
+                <text>{displayText(vm.lxserverTestResult)}</text>
+              </NativeView>
+            ) : null}
+          </NativeView>
+        </SectionCard>
+        <SectionCard
+          title="外部搜索源（topone）"
+          icon="search"
+          description="管理第三方 topone 格式搜索源，作为内置 lxserver 未命中时的回退。"
+        >
+          <SettingRow
+            title="启用外部搜索"
+            subtitle={
+              vm.state.config.voice_command_enabled
+                ? '搜索源需要返回 topone 格式结果'
+                : '需要先开启语音口令'
+            }
+          >
+            <SlSwitch
+              aria-label="启用外部搜索"
+              modelValue={vm.state.config.external_search_enabled}
+              disabled={!vm.state.config.voice_command_enabled}
+              onUpdateModelValue={($event: any) => {
+                void vm.setExternalSearchEnabled($event);
+              }}
+            ></SlSwitch>
+          </SettingRow>
+          {!vm.state.config.voice_command_enabled ? (
+            <NativeView className="dependency-hint">
+              <SlIcon name="warning" size={18}></SlIcon>
+              <NativeView>
+                <text>需要先开启"语音口令"才能使用外部搜索。</text>
+              </NativeView>
+            </NativeView>
+          ) : null}
+          <NativeView className="form-body">
             <NativeView className="card-title">
               <text>已安装搜索源</text>
             </NativeView>
@@ -2036,35 +2174,6 @@ export default function VoiceSettings(props: any) {
                 </NativeView>
               </NativeView>
             ) : null}
-            <NativeView className="field">
-              <NativeView className="field-label">
-                <text>接口测试</text>
-              </NativeView>
-              <NativeView className="inline-fields">
-                <SlInput
-                  modelValue={vm.sourceTestQuery}
-                  onUpdateModelValue={($event: any) => {
-                    vm.sourceTestQuery = $event;
-                  }}
-                  placeholder="输入测试关键字"
-                  onSubmit={($event: any) => {
-                    void vm.testSource($event);
-                  }}
-                ></SlInput>
-                <SlButton
-                  variant="outlined"
-                  label="测试"
-                  onClick={($event: any) => {
-                    void vm.testSource($event);
-                  }}
-                ></SlButton>
-              </NativeView>
-              {vm.sourceTestResult ? (
-                <NativeView className="result-pre">
-                  <text>{displayText(vm.sourceTestResult)}</text>
-                </NativeView>
-              ) : null}
-            </NativeView>
           </NativeView>
         </SectionCard>
         <SectionCard

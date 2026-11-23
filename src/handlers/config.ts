@@ -14,6 +14,9 @@ import { setDebugLog } from '../utils/debug';
 import type { SearchPriority } from '../types';
 import { DEFAULT_MUSIC_API_MODELS } from '../mina/constants';
 import { validateAIHeaders } from '../utils/ai_headers';
+import { normalizeLXServerConfig } from '../lxserver/types';
+import { LxServerProvider } from '../lxserver/provider';
+import { OnlineSearcher } from '../voicecmd/online_searcher';
 
 import { normalizeSongMatchThreshold } from '../indexing/song_match';
 
@@ -145,6 +148,11 @@ export function registerConfigHandlers(
           ai_config: aiConfig,
           default_cover_id: config.default_cover_id,
           touchscreen_lyrics_enabled: !!config.touchscreen_lyrics_enabled,
+          lxserver: config.lxserver || {
+            enabled: false, host: '', token: '', quality: '320k',
+            allowQualityFallback: true, sources: ['kw', 'kg', 'tx', 'wy', 'mg'],
+            searchTimeout: 6, urlTimeout: 12,
+          },
         },
       });
     } catch (e: any) {
@@ -468,6 +476,14 @@ export function registerConfigHandlers(
         }
       }
 
+      // 更新内置 lxserver 搜索源配置（独立于 topone 外部源通道）
+      if (body.lxserver !== undefined && body.lxserver && typeof body.lxserver === 'object') {
+        config.lxserver = normalizeLXServerConfig({
+          ...config.lxserver,
+          ...body.lxserver,
+        });
+      }
+
       await configManager.saveConfig(config);
       if (body.hourly_chime_resume_enabled === false) {
         voiceEngine.cancelHourlyResumes();
@@ -518,6 +534,74 @@ export function registerConfigHandlers(
       return jsonResponse(
         { success: false, error: e.message || String(e) },
         500,
+      );
+    }
+  });
+
+  // POST /lxserver/test - 测试内置 lxserver 连接（支持传入未保存的表单配置）
+  router.post('/lxserver/test', async (req: HTTPRequest) => {
+    try {
+      const body = parseBody(req);
+      const config = await configManager.getConfig();
+      const merged = normalizeLXServerConfig({
+        ...config.lxserver,
+        ...(body.lxserver && typeof body.lxserver === 'object' ? body.lxserver : {}),
+      });
+      const provider = new LxServerProvider(merged);
+      const result = await provider.testConnection();
+      // 失败时把 detail 放进 error，让前端 unwrap 抛出的 ApiError 携带真实原因
+      // （否则前端只会看到通用的「请求失败，请稍后重试」）
+      if (!result.ok) {
+        return jsonResponse(
+          { success: false, error: result.detail || '连接失败', data: result },
+          200,
+        );
+      }
+      return jsonResponse({ success: true, data: result });
+    } catch (e: any) {
+      return jsonResponse(
+        { success: false, error: e.message || String(e) },
+        502,
+      );
+    }
+  });
+
+  // POST /online-search/test - 统一的在线搜索测试入口。
+  // 调用与语音点歌完全相同的 OnlineSearcher.search()，不区分内置 lxserver / 外部 topone 源，
+  // 只返回命中候选，不导入、不播放。让用户测的就是真实点歌用的在线搜索能力。
+  router.post('/online-search/test', async (req: HTTPRequest) => {
+    try {
+      const body = parseBody(req);
+      const keyword = typeof body.keyword === 'string' ? body.keyword.trim() : '';
+      if (!keyword) {
+        return jsonResponse({ success: false, error: '请输入搜索关键词' }, 400);
+      }
+      const searcher = new OnlineSearcher(configManager);
+      // hint 用关键词本身，让内置 lxserver 的匹配打分与外部源行为尽量贴近真实点歌
+      const result = await searcher.search(keyword, { title: keyword });
+      if (!result) {
+        return jsonResponse({
+          success: true,
+          data: { hit: false, message: '未命中：没有可用的在线搜索源返回结果，或关键词无匹配' },
+        });
+      }
+      return jsonResponse({
+        success: true,
+        data: {
+          hit: true,
+          title: result.title,
+          artist: result.artist || '',
+          album: result.album || '',
+          duration: result.duration || 0,
+          hasUrl: !!result.url,
+          source: result.hit_source === 'lxserver' ? '内置 lxserver' :
+                  result.hit_source === 'topone' ? '外部 topone' : '未知来源',
+        },
+      });
+    } catch (e: any) {
+      return jsonResponse(
+        { success: false, error: e?.message || String(e) },
+        502,
       );
     }
   });

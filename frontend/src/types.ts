@@ -57,6 +57,19 @@ export interface MiotConfig {
   default_cover_id: string | number;
   touchscreen_lyrics_enabled: boolean;
   ai_config: AIConfig;
+  lxserver: LXServerConfig;
+}
+
+/** 内置 lxserver 搜索源配置 */
+export interface LXServerConfig {
+  enabled: boolean;
+  host: string;
+  token: string;
+  quality: '128k' | '320k' | 'flac';
+  allowQualityFallback: boolean;
+  sources: string[];
+  searchTimeout: number;
+  urlTimeout: number;
 }
 
 export interface SearchSource {

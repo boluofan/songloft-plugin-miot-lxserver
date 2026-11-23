@@ -67,6 +67,16 @@ const defaultConfig: MiotConfig = {
   default_cover_id: "",
   touchscreen_lyrics_enabled: false,
   ai_config: {},
+  lxserver: {
+    enabled: false,
+    host: "",
+    token: "",
+    quality: "320k",
+    allowQualityFallback: true,
+    sources: ["kw", "kg", "tx", "wy", "mg"],
+    searchTimeout: 6,
+    urlTimeout: 12,
+  },
 };
 
 export interface SnackbarState {
@@ -358,6 +368,10 @@ export async function loadConfig(): Promise<void> {
       config?.ai_config && typeof config.ai_config === "object"
         ? { ...config.ai_config }
         : {},
+    lxserver:
+      config?.lxserver && typeof config.lxserver === "object"
+        ? { ...defaultConfig.lxserver, ...config.lxserver }
+        : { ...defaultConfig.lxserver },
   };
   Object.assign(state.config, normalized);
   state.configLoaded = true;
