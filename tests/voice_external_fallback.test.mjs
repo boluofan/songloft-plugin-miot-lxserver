@@ -37,8 +37,8 @@ function fixture(t, options = {}) {
     search_priority: options.priority || 'parallel',
     external_search_enabled: options.enabled ?? true,
     external_search_sources: [
-      { name: 'topone', enabled: true, url: 'https://topone/search', token: 'fixture-token' },
-      { name: 'backup', enabled: true, url: 'https://backup/search', token: 'fixture-token' },
+      { id: 'topone', name: 'topone', enabled: true, url: 'https://topone/search', token: 'fixture-token' },
+      { id: 'backup', name: 'backup', enabled: true, url: 'https://backup/search', token: 'fixture-token' },
     ],
     external_search_timeout: 0.01,
     external_search_no_import: options.noImport || false,
@@ -127,7 +127,22 @@ for (const [action, name] of [['play_artist', '刘德华'], ['play_playlist', '�
         for (const r of searches) assert.deepEqual(r.body, { keyword: name, quality: '320k' });
         assert.equal(f.requests.filter(r => r.url.endsWith('/songs/remote')).length, 1);
         assert.deepEqual(f.pushes, []);
-        assert.deepEqual(f.queuePlays, [{ ...song, hit_source: 'topone', id: 42, url: '/api/v1/songs/42/play', type: 'remote' }]);
+        // 入库成「解析型」：不落当天就失效的直链，改存引用，播放时宿主回调本插件现解析
+        const [imported] = f.requests.find(r => r.url.endsWith('/songs/remote')).body;
+        assert.equal(imported.url, '', '直链不入库');
+        assert.equal(imported.plugin_entry_path, 'miot');
+        assert.equal(imported.dedup_key, `topone:backup:${song.title}|${song.artist}`, '同一首歌只占一行');
+        assert.deepEqual(JSON.parse(imported.source_data), {
+          v: 1, owner: 'miot', kind: 'topone', source_id: 'backup', keyword: name,
+          name: song.title, singer: song.artist, duration: 240,
+        });
+        const [track] = f.queuePlays;
+        assert.equal(track.title, song.title);
+        assert.equal(track.artist, song.artist);
+        assert.equal(track.id, 42);
+        assert.equal(track.url, '/api/v1/songs/42/play');
+        assert.equal(track.type, 'remote');
+        assert.equal(track.hit_source, 'topone');
         assert.deepEqual(f.speech, []);
         assert.equal(f.events.filter(e => e === 'prepare').length, 1);
         assert.equal(f.events.filter(e => e === 'stop').length, 1);

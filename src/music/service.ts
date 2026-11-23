@@ -1412,7 +1412,7 @@ export class MusicCommandService {
 
   /**
    * 本地没有该歌手时的在线兜底（歌手语义专用）：
-   *   1. 内置 lxserver 在线歌手队列（需开 artist_queue_enabled，仅 tx/wy 支持）→ 整队播放；
+   *   1. 内置 lxserver 歌手在线歌曲（需开 artist_queue_enabled，仅 tx/wy 支持）→ 整队播放；
    *   2. 队列不可用 / 解析失败 → 回退原「只搜 top-1 单曲」逻辑，外部 topone 源行为不变。
    */
   private async playArtistExternalFallback(
@@ -1428,10 +1428,14 @@ export class MusicCommandService {
   }
 
   /**
-   * 用内置 lxserver 播放该歌手的多首热门歌（临时队列，不入库）。
+   * 用内置 lxserver 播放该歌手的多首热门歌。
    *
-   * 队列里只有前 2 首带直链，其余靠 pm 的懒解析钩子在临播前补——首播等待因此从
-   * 「N 首解析之和」降到「歌手搜索 + 2 首解析」的量级。
+   * 两种形态，由「直链不入库」开关决定：
+   *   - 开（'push'）：临时队列、不入库。只有前 2 首带直链，其余靠 pm 的懒解析钩子临播前补，
+   *     首播等待因此从「N 首解析之和」降到「歌手搜索 + 2 首解析」的量级。
+   *   - 关（'import'）：整队入库成「解析型」（plugin_entry_path + source_data），播放时宿主
+   *     回调本插件 /api/music/url 现解析。曲库条目永久有效、可收藏可重播，且 dedup_key 让
+   *     同一首歌只占一行；代价是首播多一次解析往返。
    */
   private async tryOnlineArtistQueue(
     artistName: string,
@@ -1440,8 +1444,11 @@ export class MusicCommandService {
     deviceId: string,
   ): Promise<PlayedSong | null> {
     let enabled = false;
+    let noImport = true;
     try {
-      enabled = (await this.configManager.getConfig()).lxserver?.artist_queue_enabled === true;
+      const cfg = await this.configManager.getConfig();
+      enabled = cfg.lxserver?.artist_queue_enabled === true;
+      noImport = cfg.external_search_no_import === true;
     } catch (e) {
       songloft.log.warn('[MusicCommandService] read artist_queue_enabled failed: ' + String(e));
       return null;
@@ -1457,12 +1464,59 @@ export class MusicCommandService {
       .catch((e) => { songloft.log.warn('[MusicCommandService] artist queue TTS failed: ' + String(e)); });
 
     const [queue] = await Promise.all([
-      this.onlineSearcher.searchArtistQueue(artistName, { limit: 10, preResolve: 2 }),
+      this.onlineSearcher.searchArtistQueue(
+        artistName,
+        noImport ? { limit: 10, preResolve: 2 } : { limit: 10, importMode: true },
+      ),
       ttsTask,
     ]);
     if (!queue || queue.items.length === 0) {
       songloft.log.warn(`[MusicCommandService] lxserver artist queue empty for "${artistName}" (${Date.now() - started}ms)`);
       return null;
+    }
+
+    // 入库形态：整队写进曲库（解析型），再按真实 id 起播——收藏/已播放/重播都能正常工作。
+    if (queue.mode === 'import') {
+      const imported = await this.onlineSearcher.importSongs(queue.items);
+      if (!imported || imported.length === 0) {
+        songloft.log.warn(`[MusicCommandService] artist queue import failed for "${artistName}"`);
+        return null;
+      }
+      const songs: any[] = [];
+      queue.items.forEach((item, index) => {
+        const row = imported[index];
+        if (!row || !row.id) return; // 个别条目导入失败：跳过，不影响整队
+        songs.push({
+          id: row.id,
+          title: item.title,
+          artist: item.artist,
+          album: item.album || '',
+          duration: item.duration || 0,
+          cover_url: item.cover_url || '',
+          // 解析型歌曲：url 是宿主的统一播放端点，直链在播放时才由本插件解析
+          url: row.url || `/api/v1/songs/${row.id}/play`,
+          type: 'remote',
+        });
+      });
+      if (songs.length === 0) return null;
+
+      pm.setSongUrlResolver(null); // 入库形态不需要懒解析钩子，宿主会自己解析
+      pm.setAnnounceOnSongChange(true);
+      const ok = await pm.playWithSongs(songs, 0, 'order', `歌手: ${queue.artistName}`, '', undefined, false);
+      if (!ok) {
+        songloft.log.warn(`[MusicCommandService] artist queue (import) playback failed for "${artistName}"`);
+        return null;
+      }
+      const current = pm.getCurrentSong();
+      songloft.log.info(
+        `[MusicCommandService] lxserver artist queue (import) playing: artist="${queue.artistName}" ` +
+        `total=${queue.total} queue=${songs.length} firstIn=${Date.now() - started}ms`,
+      );
+      return {
+        songId: current?.id,
+        songName: current?.title || artistName,
+        artist: current?.artist || queue.artistName,
+      };
     }
 
     const indexOf = new Map<any, number>();

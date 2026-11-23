@@ -1872,7 +1872,7 @@ export default function VoiceSettings(props: any) {
                   }}
                 ></SlSwitch>
                 <NativeView className="field-help">
-                  <text>默认关闭，开启后仅对直链生效——不入库、直接推给音箱（适合会过期的临时链接，避免曲库堆积失效条目），因此不适合追加歌单。解析型结果不受影响，仍会入库。</text>
+                  <text>关闭（默认）：命中以「引用」入库——只存怎么取到这首歌（内置源存平台与曲目标识，外部源存源/关键词/曲名提示），直链在播放时现解析，曲库条目不会因签名过期而失效，可收藏可重播。开启：仅对直链生效，不入库、直接把链接推给音箱，适合会过期的临时链接，但不适合追加歌单；此时直链缓存 5 分钟过期，过期后临播自动重解析。</text>
                 </NativeView>
               </NativeView>
             </NativeView>
@@ -1928,11 +1928,11 @@ export default function VoiceSettings(props: any) {
             ></SlSwitch>
           </SettingRow>
           <SettingRow
-            title="在线歌手队列"
-            subtitle="本地没有该歌手时，用 lxserver 播他的一批热门歌（仅 tx / wy 音源支持，首播先解析前 2 首）。关闭则只播搜到的第一首"
+            title="歌手在线搜索"
+            subtitle="本地没有该歌手歌曲时，搜索该歌手的一批热门歌。关闭则只播搜到的第一首"
           >
             <SlSwitch
-              aria-label="在线歌手队列"
+              aria-label="歌手在线搜索"
               modelValue={vm.state.config.lxserver.artist_queue_enabled}
               disabled={!vm.state.config.lxserver.enabled}
               onUpdateModelValue={($event: any) => {

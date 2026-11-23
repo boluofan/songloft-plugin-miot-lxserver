@@ -40,6 +40,7 @@ import { registerVoiceCommandHandlers } from './handlers/voice_command';
 import { registerIndexingHandlers } from './handlers/indexing';
 import { registerMemoryHandlers } from './handlers/memory';
 import { registerLyricHandlers } from './handlers/lyric';
+import { registerMusicSourceHandlers } from './handlers/music_url';
 import { registerGroupHandlers } from './handlers/group';
 import { registerProgressGroupHandlers } from './handlers/progress_group';
 import { registerSearchProviderComm } from './handlers/search_registry';
@@ -268,6 +269,8 @@ async function onInit(): Promise<void> {
   registerIndexingHandlers(router, indexingManager);
   registerMemoryHandlers(router, memoryService, configManager);
   registerLyricHandlers(router);
+  // 解析型音源：宿主播放本插件入库的歌曲时回调 /music/url 现取直链
+  registerMusicSourceHandlers(router, configManager);
   registerGroupHandlers(router, configManager, playlistManagerMap);
   registerProgressGroupHandlers(router, configManager);
 

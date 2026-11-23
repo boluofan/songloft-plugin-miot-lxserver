@@ -6,6 +6,8 @@
 
 import { LxServerClient } from './client';
 import type { LXArtist, LXPlayableUrl, LXServerConfig, LXTrack } from './types';
+import type { LXSongRef } from './ref';
+import { buildSongRef } from './ref';
 import type { OnlineSearchResult } from '../voicecmd/online_searcher';
 
 /** 与 online_searcher 的 hint 对齐 */
@@ -78,7 +80,7 @@ export interface LXQueueItem {
   playable?: LXPlayableUrl;
 }
 
-/** 在线歌手队列解析结果 */
+/** 歌手在线歌曲解析结果 */
 export interface LXArtistQueue {
   /** 实际命中的歌手名（lxserver 返回的，可能是别名/繁简差异） */
   artistName: string;
@@ -170,11 +172,9 @@ export class LxServerProvider {
           cover_url: track.cover || undefined,
           url: playable.url,
           dedup_key: `lxserver:${track.source}:${track.id}`,
-          source_data: {
-            platform: track.source,
-            quality: playable.type,
-            sourceName: playable.sourceName || '',
-          },
+          // 完整引用（平台 + id + 裁剪后的 songInfo）：入库模式下用它代替直链，
+          // 播放时由宿主回调本插件的 /api/music/url 现解析。
+          source_data: buildSongRef(track, playable.type),
         };
       } catch (e) {
         songloft.log.warn(
@@ -188,7 +188,7 @@ export class LxServerProvider {
   }
 
   /**
-   * 在线歌手队列：歌手名 → 该歌手热门歌曲列表。仅 tx/wy 支持（其他源调 type=singer 直接 500）。
+   * 歌手在线歌曲：歌手名 → 该歌手热门歌曲列表。仅 tx/wy 支持（其他源调 type=singer 直接 500）。
    *
    * 只解析前 `preResolve` 首的直链：artistSongs 本身 1.7~2s，再逐首串行解析 /api/music/url
    * 会把首播推迟到数秒。其余曲目保持「未解析」交给播放链路临播前按需补
@@ -252,20 +252,24 @@ export class LxServerProvider {
     const items: LXQueueItem[] = picked.map((track) => ({ track }));
 
     // 首批并发解析（失败隔离）：任何一首失败都不影响其余，未解析的临播时再补。
-    await Promise.all(
-      items.slice(0, Math.max(0, Math.min(take, preResolve))).map(async (item) => {
-        try {
-          item.playable = await this.client.resolveUrlLadder(item.track.raw);
-        } catch (e) {
-          songloft.log.warn(
-            `[LxServerProvider] artist queue url failed for ${item.track.name}: ${String(e)}`,
-          );
-        }
-      }),
-    );
+    // preResolve=0 表示「入库型」队列：压根不需要直链，播放时宿主自己回调解析，直接跳过。
+    const plan = Math.max(0, Math.min(take, preResolve));
+    if (plan > 0) {
+      await Promise.all(
+        items.slice(0, plan).map(async (item) => {
+          try {
+            item.playable = await this.client.resolveUrlLadder(item.track.raw);
+          } catch (e) {
+            songloft.log.warn(
+              `[LxServerProvider] artist queue url failed for ${item.track.name}: ${String(e)}`,
+            );
+          }
+        }),
+      );
+    }
 
     const playableCount = items.filter((i) => !!i.playable).length;
-    if (playableCount === 0) {
+    if (plan > 0 && playableCount === 0) {
       // 一首都解析不出来说明源侧没可用音源（或自定义源未配），交给上层回退单曲兜底。
       this.lastMissReason = 'no_playable_url';
       songloft.log.warn('[LxServerProvider] artist queue: no playable url in first batch for ' + name);
@@ -287,6 +291,68 @@ export class LxServerProvider {
   /** 按需解析单首直链（歌手队列懒解析用；失败由调用方跳过该首） */
   async resolveTrackUrl(track: LXTrack): Promise<LXPlayableUrl> {
     return this.client.resolveUrlLadder(track.raw);
+  }
+
+  /**
+   * 带总时长预算的执行：QuickJS 是单线程调度器，一次解析卡太久会把插件的其它调用（含播放）
+   * 全部堵在后面。宿主给 /music/url 的调度预算是 30s，这里留 5s 余量，超时就让宿主走 502 切源。
+   */
+  private async withBudget<T>(ms: number, run: () => Promise<T>): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        run(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`解析超时(>${Math.round(ms / 1000)}s)`)), ms);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * 解析型音源：按「引用」现取直链。宿主 POST /api/music/url 时调用。
+   *
+   * 两条路：
+   *   1. source_data 里带着裁剪后的 songInfo → 直接解析（零额外请求，最常用）；
+   *   2. raw 缺失（超限降级/老数据）或解析失败 → 按 platform + id 重搜拿回完整对象再解析。
+   *      重搜可能命中不同版本，所以优先按 (platform, id) 精确匹配，其次才按歌名。
+   */
+  async resolveSongRef(ref: LXSongRef): Promise<LXPlayableUrl> {
+    if (!this.isConfigured()) throw new Error('lxserver 未配置或未启用');
+    const budget = Math.min(25_000, Math.max(5_000, this.cfg.urlTimeout * 1000 * 2));
+    return this.withBudget(budget, () => this.resolveSongRefInner(ref));
+  }
+
+  private async resolveSongRefInner(ref: LXSongRef): Promise<LXPlayableUrl> {
+    let lastErr: unknown = null;
+    if (ref.raw) {
+      try {
+        return await this.client.resolveUrlLadder(ref.raw);
+      } catch (e) {
+        lastErr = e;
+        songloft.log.warn(`[LxServerProvider] ref raw resolve failed ${ref.platform}/${ref.id}: ${String(e)}`);
+      }
+    }
+
+    const keyword = (ref.name || '').trim() || [ref.singer, ref.name].filter(Boolean).join(' ').trim();
+    if (keyword) {
+      try {
+        const tracks = ref.platform
+          ? await this.client.searchSongs(ref.platform, keyword, 10)
+          : await this.client.searchAggregate(keyword);
+        const hit =
+          tracks.find((t) => String(t.source) === ref.platform && t.id === ref.id) ||
+          tracks.find((t) => t.id === ref.id) ||
+          (ref.name ? tracks.find((t) => normalizeText(t.name) === normalizeText(ref.name || '')) : undefined);
+        if (hit) return await this.client.resolveUrlLadder(hit.raw);
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+
+    throw lastErr instanceof Error ? lastErr : new Error(`解析失败:${ref.platform}/${ref.id} 无可用音源`);
   }
 
   /** 连通性测试：探活 + 鉴权态，供设置页调用 */

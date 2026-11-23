@@ -1,4 +1,4 @@
-// 在线歌手队列的「懒解析」行为：队列里未解析直链的临时曲目，只在临播前才补 URL。
+// 歌手在线歌曲的「懒解析」行为：队列里未解析直链的临时曲目，只在临播前才补 URL。
 // 单独成文件的原因：player_failures.test.mjs 末尾有条历史遗留的异步报错会截断 TAP 输出，
 // 放在那里跑不出结果。
 import assert from 'node:assert/strict';

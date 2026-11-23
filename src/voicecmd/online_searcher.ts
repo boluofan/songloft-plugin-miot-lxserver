@@ -14,6 +14,8 @@ import type { PlaylistManager } from '../player/manager';
 import { LxServerProvider } from '../lxserver/provider';
 import type { LXMissReason } from '../lxserver/provider';
 import type { LXArtistQueue } from '../lxserver/provider';
+import { PLUGIN_ENTRY_PATH, buildSongRef, buildToponeRef, isOwnSongRef, toponeDedupKey } from '../lxserver/ref';
+import type { ToponeSongRef } from '../lxserver/ref';
 import { normalizeLXServerConfig } from '../lxserver/types';
 
 // 外部搜索 API 请求体
@@ -47,7 +49,7 @@ export interface OnlineSearchDiagnosis {
 }
 
 /**
- * 在线歌手队列（仅内置 lxserver）。
+ * 歌手在线歌曲（仅内置 lxserver）。
  *
  * 首播只等前 `preResolve` 首的直链：artistSongs 约 1.7~2s，逐首解析 10 首会把首播推迟到
  * 数秒，所以其余曲目先拿元数据占位，等真的快播到它们时再解析（见 resolveUrl 的 lookahead）。
@@ -57,11 +59,17 @@ export interface OnlineArtistQueue {
   artistName: string;
   /** 该歌手在源上的可用歌曲总数（未按 limit 截断），仅用于日志 */
   total: number;
-  /** 队列（顺序即热门度），url 字段不填充：这些曲目走「不入库直推」，由 resolveUrl 现取 */
+  /**
+   * 队列形态：
+   *   - 'push'   ：不入库直推，items 的 url 由 peekUrl/resolveUrl 按需补（懒解析）
+   *   - 'import' ：入库成解析型，items 带 plugin_entry_path + source_data，播放时由宿主解析
+   */
+  mode: 'push' | 'import';
+  /** 队列（顺序即热门度）。'push' 模式 url 不填充，走懒解析；'import' 模式 url 恒为空。 */
   items: OnlineSearchResult[];
-  /** 已解析好的音箱可播 URL；未解析返回 ''（供首发直接起播，避免多一次 await） */
+  /** 已解析好的音箱可播 URL；未解析（或 'import' 模式）返回 '' */
   peekUrl: (index: number) => string;
-  /** 懒解析第 index 首，返回音箱可播 URL（内部按需解析直链 + 转码代理） */
+  /** 懒解析第 index 首，返回音箱可播 URL（'import' 模式返回 ''，由宿主解析） */
   resolveUrl: (index: number) => Promise<string>;
 }
 
@@ -105,6 +113,14 @@ interface RemoteSongsResponse {
     dedup_key: string;
   }>;
 }
+
+/**
+ * 外部源「按引用重搜」的总预算。
+ *
+ * 和内置源的解析预算对齐（宿主给 /music/url 的调度预算 30s，留 5s 余量）：QuickJS 是单线程
+ * 调度器，逐源重搜若各自等到超时，源一多就会把插件的其它调用全堵住。超预算就让宿主走 502 切源。
+ */
+const SOURCE_REF_BUDGET_MS = 25_000;
 
 /**
  * 在线歌曲搜索器
@@ -280,7 +296,7 @@ export class OnlineSearcher {
       const r = await tasks[i];
       if (r) {
         songloft.log.info(`[OnlineSearcher] Hit from source[${i}] "${sources[i].name || sources[i].url}" for keyword: ${keyword}`);
-        return { ...r, hit_source: 'topone' };
+        return { ...this.attachToponeRef(r, sources[i], keyword, hint), hit_source: 'topone' };
       }
     }
     songloft.log.warn('[OnlineSearcher] No source matched for keyword: ' + keyword);
@@ -288,7 +304,87 @@ export class OnlineSearcher {
   }
 
   /**
-   * 在线歌手队列：只用内置 lxserver 搜「该歌手的多首热门歌」，供「播放歌手X」在本地
+   * 源的稳定身份：写引用和比对引用都用它。
+   * 正常配置一定有 id；老配置/手改配置可能缺，退到 url、name（两处必须一致，否则重搜时认不出原源）。
+   */
+  private sourceIdOf(source: ExternalSearchSource): string {
+    return (source.id || source.url || source.name || '').trim();
+  }
+
+  /**
+   * 给外部源命中结果挂上「引用」：记录怎么搜到的（源 + 关键词 + hint），
+   * 入库模式下存它而不是直链，播放时用同样的参数重搜拿新鲜链接。
+   *
+   * 只处理直链型结果：如果这个源本身已经是别的插件的解析型结果（带 plugin_entry_path），
+   * 那套引用是它自己维护的，我们不能覆盖。
+   */
+  private attachToponeRef(
+    result: OnlineSearchResult,
+    source: ExternalSearchSource,
+    keyword: string,
+    hint: { title: string; artist?: string; duration?: number } | null,
+  ): OnlineSearchResult {
+    const url = (result.url || '').trim();
+    const isDirectLink = url.startsWith('http://') || url.startsWith('https://');
+    // 源身份都没有就没法写引用（重搜时不知道该问谁），保持原样按直链处理
+    const sourceId = this.sourceIdOf(source);
+    if (!isDirectLink || result.plugin_entry_path || !sourceId) return result;
+    return {
+      ...result,
+      source_data: buildToponeRef(result, { sourceId, keyword, hint }),
+      dedup_key: result.dedup_key || toponeDedupKey(sourceId, result),
+    };
+  }
+
+  /**
+   * 解析型音源（外部源）：按引用重跑一次该源的搜索，拿回新鲜直链。
+   * 宿主 POST /api/music/url 时由 handler 调用。
+   *
+   * 原源优先，其余启用源按配置顺序兜底——源可能被改名/禁用/删掉，或那次搜索本身就是偶发失败。
+   */
+  async resolveSourceRef(ref: ToponeSongRef): Promise<string> {
+    const keyword = (ref.keyword || ref.name || '').trim();
+    if (!keyword) throw new Error('引用缺少搜索关键词');
+    // hint 用于让源在重搜时优先给出同一首歌；缺 title 时不给 hint（源会只按关键词搜）
+    const hintTitle = ref.hint?.title || ref.name || '';
+    const hintArtist = ref.hint?.artist || ref.singer;
+    const hintDuration = ref.hint?.duration || ref.duration;
+    const hint = hintTitle
+      ? {
+        title: hintTitle,
+        ...(hintArtist ? { artist: hintArtist } : {}),
+        ...(hintDuration && hintDuration > 0 ? { duration: hintDuration } : {}),
+      }
+      : null;
+
+    const sources = await this.getEnabledSources();
+    if (sources.length === 0) throw new Error('没有启用的外部搜索源');
+
+    const cfg = await this.configManager.getConfig();
+    const timeoutSec = cfg.external_search_timeout > 0 ? cfg.external_search_timeout : 6;
+    const deadline = Date.now() + SOURCE_REF_BUDGET_MS;
+    // sort 是稳定排序：命中原源排到最前，其余保持配置里的优先级
+    const ordered = [...sources].sort(
+      (a, b) => Number(this.sourceIdOf(b) === ref.source_id) - Number(this.sourceIdOf(a) === ref.source_id),
+    );
+
+    for (const source of ordered) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const hit = await this.searchOne(source, keyword, hint, Math.min(timeoutSec * 1000, remaining));
+      const url = (hit?.url || '').trim();
+      if (url.startsWith('http://') || url.startsWith('https://')) {
+        if (this.sourceIdOf(source) !== ref.source_id) {
+          songloft.log.info(`[OnlineSearcher] ref fallback to source "${source.name || source.id}" for: ${keyword}`);
+        }
+        return url;
+      }
+    }
+    throw new Error(`外部源解析失败:${keyword}`);
+  }
+
+  /**
+   * 歌手在线歌曲：只用内置 lxserver 搜「该歌手的多首热门歌」，供「播放歌手X」在本地
    * 没有该歌手时整队播放。外部 topone 源不参与（保持原先 top-1 单曲语义）。
    *
    * 延迟策略（懒解析）：
@@ -298,7 +394,7 @@ export class OnlineSearcher {
    */
   async searchArtistQueue(
     artistName: string,
-    opts?: { limit?: number; preResolve?: number },
+    opts?: { limit?: number; preResolve?: number; importMode?: boolean },
   ): Promise<OnlineArtistQueue | null> {
     const name = (artistName || '').replace(/\s+/g, ' ').trim();
     if (!name) return null;
@@ -306,8 +402,11 @@ export class OnlineSearcher {
     const provider = await this.getLxProvider();
     if (!provider || !provider.isConfigured()) return null;
 
+    // importMode：整队入库成「解析型」，播放时宿主回调 /api/music/url 现解析。
+    // 这种模式下不需要任何直链，所以 preResolve 强制为 0 —— 否则会白解析 10 首。
+    const importMode = opts?.importMode === true;
     const limit = Math.max(1, Math.min(20, opts?.limit ?? 10));
-    const preResolve = Math.max(1, Math.min(limit, opts?.preResolve ?? 2));
+    const preResolve = importMode ? 0 : Math.max(1, Math.min(limit, opts?.preResolve ?? 2));
     let queue: LXArtistQueue | null;
     try {
       queue = await provider.artistQueue(name, limit, preResolve);
@@ -345,19 +444,20 @@ export class OnlineSearcher {
     };
 
     // 首批：provider 已解析直链，这里只需补转码代理判定（不发网络请求）。
-    await Promise.all(
-      queue.items.slice(0, preResolve).map(async (item, index) => {
-        if (!item.playable) return;
-        try {
-          const pushUrl = await this.resolveDirectPushUrl(item.playable.url, item.track.duration);
-          if (pushUrl) resolved.set(index, pushUrl);
-        } catch { /* 单首失败不影响队列 */ }
-      }),
-    );
+    if (!importMode) {
+      await Promise.all(
+        queue.items.slice(0, preResolve).map(async (item, index) => {
+          if (!item.playable) return;
+          try {
+            const pushUrl = await this.resolveDirectPushUrl(item.playable.url, item.track.duration);
+            if (pushUrl) resolved.set(index, pushUrl);
+          } catch { /* 单首失败不影响队列 */ }
+        }),
+      );
 
-    if (resolved.size === 0) {
-      songloft.log.warn('[OnlineSearcher] lxserver artist queue: no playable url after pre-resolve');
-      return null;
+      if (resolved.size === 0) {
+        songloft.log.warn('[OnlineSearcher] lxserver artist queue: no playable url after pre-resolve');
+        return null;
     }
 
     const items: OnlineSearchResult[] = queue.items.map((item) => ({
@@ -367,21 +467,23 @@ export class OnlineSearcher {
       duration: item.track.duration || undefined,
       cover_url: item.track.cover || undefined,
       dedup_key: `lxserver:${item.track.source}:${item.track.id}`,
-      source_data: { platform: item.track.source, quality: item.playable?.type || '' },
+      // 一律带完整引用：'push' 模式用不上，但 'import' 模式靠它代替直链入库。
+      source_data: buildSongRef(item.track, item.playable?.type),
       hit_source: 'lxserver',
     }));
 
     songloft.log.info(
       `[OnlineSearcher] lxserver artist queue "${queue.artistName}" total=${queue.total} ` +
-      `take=${items.length} preResolved=${resolved.size}`,
+      `take=${items.length} mode=${importMode ? 'import' : 'push'} preResolved=${resolved.size}`,
     );
 
     return {
       artistName: queue.artistName,
       total: queue.total,
+      mode: importMode ? 'import' : 'push',
       items,
       peekUrl: (index: number) => resolved.get(index) || '',
-      resolveUrl: (index: number) => resolveOne(index, true),
+      resolveUrl: (index: number) => (importMode ? Promise.resolve('') : resolveOne(index, true)),
     };
   }
 
@@ -551,8 +653,20 @@ export class OnlineSearcher {
       songloft.log.info('[OnlineSearcher] No-import enabled but result is resolution-type (no direct url), falling back to import: ' + song.title);
     }
 
+    // 入库模式：可重解析的结果（内置 lxserver）不存直链，改存「引用」。
+    // 直链是签名 CDN、当天就失效；引用永久有效，播放时由宿主回调本插件 /api/music/url 现解析。
+    // 顺带修掉一个老问题：以前 plugin_entry_path 为空 → 宿主 dedup 不生效 → 每搜一次多一行死条目；
+    // 现在 ('miot', 'lxserver:<platform>:<id>') 是唯一键，同一首歌永远只占一行。
+    const target = this.toResolvableResult(song) ?? song;
+    if (target !== song) {
+      songloft.log.info(
+        '[OnlineSearcher] Import as resolvable source: ' + song.title + ' - ' + song.artist +
+        ' (dedup=' + (song.dedup_key || '-') + ')',
+      );
+    }
+
     // 同步导入到 songloft 数据库，直接拿到 songloft 分配的 id 和 url
-    const imported = await this.importSong(song);
+    const imported = await this.importSong(target);
     if (!imported) {
       songloft.log.error('[OnlineSearcher] Failed to import song, cannot play: ' + song.title);
       return false;
@@ -597,7 +711,7 @@ export class OnlineSearcher {
     // 没有目标歌单时，导入歌曲与已入库的独立歌曲共用临时歌手队列。
     if (pm && indexingManager) {
       indexingManager.addImportedSong({ id: imported.id, title: song.title, artist: song.artist, album: song.album });
-      let fullSong: any = { ...song, id: imported.id, url: imported.url, type: 'remote' };
+      let fullSong: any = { ...target, id: imported.id, url: imported.url, type: 'remote' };
       try {
         fullSong = await songloft.songs.getById(imported.id) || fullSong;
       } catch (e) {
@@ -661,6 +775,70 @@ export class OnlineSearcher {
       return false;
     }
     return await this.playSearchResult(song, accountId, deviceId, minaService);
+  }
+
+  /**
+   * 把「带引用」的搜索结果改写成解析型：清空直链，带上本插件的 entryPath。
+   * 只认自家产出的引用（isOwnSongRef），外部源的结构不碰。
+   * 返回 null 表示这条结果只能按直链入库（topone 等）。
+   */
+  private toResolvableResult(song: OnlineSearchResult): OnlineSearchResult | null {
+    if (!isOwnSongRef(song)) return null;
+    return {
+      ...song,
+      url: '',
+      plugin_entry_path: PLUGIN_ENTRY_PATH,
+      source_data: typeof song.source_data === 'string'
+        ? song.source_data
+        : JSON.stringify(song.source_data ?? {}),
+    };
+  }
+
+  /**
+   * 批量导入（歌手队列用）：一次 POST /api/v1/songs/remote 把整队写进曲库。
+   * 返回与入参同序的 {id, url}；任一条失败（如标题为空）整批失败返回 null。
+   */
+  async importSongs(items: OnlineSearchResult[]): Promise<Array<{ id: number; url: string }> | null> {
+    if (items.length === 0) return [];
+    const body: RemoteSongItem[] = items.map((song) => ({
+      title: song.title,
+      artist: song.artist || '',
+      album: song.album || '',
+      cover_url: song.cover_url || '',
+      duration: song.duration || 0,
+      url: song.url || '',
+      plugin_entry_path: song.plugin_entry_path || '',
+      source_data: typeof song.source_data === 'string'
+        ? song.source_data
+        : (song.source_data ? JSON.stringify(song.source_data) : ''),
+      dedup_key: song.dedup_key || '',
+      lyric: song.lyric || '',
+      lyric_source: song.lyric_source || '',
+    }));
+
+    try {
+      const pluginToken = await songloft.plugin.getToken();
+      const serverHost = await getHostAPIBaseUrl();
+      const resp = await fetch(serverHost + '/api/v1/songs/remote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${pluginToken}` },
+        body: JSON.stringify(body),
+      });
+      const text = await resp.text();
+      if (!resp.ok) {
+        songloft.log.warn(`[OnlineSearcher] Batch import failed status=${resp.status}: ${text}`);
+        return null;
+      }
+      const result = JSON.parse(text) as RemoteSongsResponse;
+      const songs = result?.songs || [];
+      if (songs.length !== items.length) {
+        songloft.log.warn(`[OnlineSearcher] Batch import count mismatch: expect=${items.length} got=${songs.length}`);
+      }
+      return songs.map((s) => ({ id: s.id, url: s.url || `/api/v1/songs/${s.id}/play` }));
+    } catch (e) {
+      songloft.log.warn('[OnlineSearcher] Batch import error: ' + String(e));
+      return null;
+    }
   }
 
   /**

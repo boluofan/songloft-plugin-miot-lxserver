@@ -53,6 +53,15 @@ const lxSong = (overrides = {}) => ({
 });
 const toponeResp = (data) => ({ status: 200, text: async () => JSON.stringify({ code: 0, data }) });
 
+/** 外部源命中：直链照给，同时挂上「怎么搜到的」引用（入库模式靠它代替直链） */
+function assertToponeRef(result, sourceId, keyword) {
+  assert.equal(result.source_data?.kind, 'topone', '挂上 topone 引用');
+  assert.equal(result.source_data.source_id, sourceId);
+  assert.equal(result.source_data.keyword, keyword);
+  assert.equal(result.source_data.owner, 'miot');
+  assert.equal(result.dedup_key, `topone:${sourceId}:${result.title}|${result.artist}`, '给出可去重的 dedup_key');
+}
+
 test('内置 lxserver 命中：返回可播直链与 source_data，不发 topone 请求', async t => {
   const { searcher, requests } = fixture(t, {
     handler: (url) => {
@@ -81,7 +90,11 @@ test('lxserver 未命中时回退 topone 外部源', async t => {
     },
   });
   const result = await searcher.search('稻香', { title: '稻香', artist: '周杰伦' });
-  assert.deepEqual(result, { ...toponeSong, hit_source: 'topone' });
+  assert.equal(result.url, toponeSong.url, '直链模式仍返回可直接播的链接');
+  assert.equal(result.artist, '周杰伦');
+  assert.equal(result.hit_source, 'topone');
+  assertToponeRef(result, 'primary', '稻香');
+  assert.deepEqual(result.source_data.hint, { title: '稻香', artist: '周杰伦' }, '记下 hint 供重搜时优先命中同一首');
   assert.ok(requests.some(r => r.url.includes('lx.test')), '先试了 lxserver');
   assert.ok(requests.some(r => r.url.includes('primary.test')), '再试了 topone');
 });
@@ -96,7 +109,10 @@ test('lxserver 直链全部失败时回退 topone', async t => {
       return toponeResp(toponeSong);
     },
   });
-  assert.deepEqual(await searcher.search('晴天', { title: '晴天' }), { ...toponeSong, hit_source: 'topone' });
+  const result = await searcher.search('晴天', { title: '晴天' });
+  assert.equal(result.url, toponeSong.url);
+  assert.equal(result.hit_source, 'topone');
+  assertToponeRef(result, 'primary', '晴天');
 });
 
 test('lxserver 禁用时完全不发请求，仅走 topone', async t => {
@@ -106,7 +122,11 @@ test('lxserver 禁用时完全不发请求，仅走 topone', async t => {
     toponeSources: ['primary'],
     handler: () => toponeResp(toponeSong),
   });
-  assert.deepEqual(await searcher.search('稻香', null), { ...toponeSong, hit_source: 'topone' });
+  const result = await searcher.search('稻香', null);
+  assert.equal(result.url, toponeSong.url);
+  assert.equal(result.hit_source, 'topone');
+  assert.equal(result.source_data.kind, 'topone');
+  assert.equal(result.source_data.keyword, '稻香', 'hint 为空时仍记下关键词');
   assert.ok(requests.every(r => !r.url.includes('lx.test')), 'lxserver 禁用时不请求');
 });
 
@@ -182,7 +202,7 @@ test('searchWithDiagnosis：候选存在但不匹配时说明匹配度不足', a
   assert.match(missed.reason, /匹配度不足/);
 });
 
-// ===== 在线歌手队列（懒解析） =====
+// ===== 歌手在线歌曲（懒解析） =====
 
 const lxArtist = (overrides = {}) => ({
   id: '7763', name: 'G.E.M.邓紫棋', picUrl: 'http://y.gtimg.cn/a.jpg',

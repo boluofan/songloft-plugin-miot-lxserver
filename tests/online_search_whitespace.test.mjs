@@ -7,6 +7,8 @@ const load = loader({
 });
 const { OnlineSearcher } = load('../src/voicecmd/online_searcher.ts');
 const song = { title: '山峰山峰 等等我', artist: '小甜甜', url: 'https://music.test/song.mp3' };
+/** 命中结果除了这三个字段还会挂引用（source_data/dedup_key），断言只比播放相关的部分 */
+const playable = (result) => result && { title: result.title, artist: result.artist, url: result.url };
 const response = (code = 0, data = song) => ({ status: 200, text: async () => JSON.stringify({ code, data }) });
 function fixture(t, respond, sources = ['primary']) {
   const previous = globalThis.songloft;
@@ -21,7 +23,7 @@ function fixture(t, respond, sources = ['primary']) {
   const searcher = new OnlineSearcher({
     getConfig: async () => ({
       external_search_enabled: true, external_search_timeout: 1,
-      external_search_sources: sources.map(name => ({ name, enabled: true, url: `https://${name}.test/search`, token: 'fixture' })),
+      external_search_sources: sources.map(name => ({ id: name, name, enabled: true, url: `https://${name}.test/search`, token: 'fixture' })),
     })
   });
   return { searcher, requests };
@@ -31,7 +33,7 @@ for (const gap of [' ', '  ', '\t', '\n', '\u3000', '\u00a0']) {
   test(`topone miss retries the keyword and hints without whitespace: ${JSON.stringify(gap)}`, async t => {
     const f = fixture(t, ({ body }) => body.keyword === '山峰山峰等等我男生合唱版' ? response() : response(404, null));
     const hint = { title: `山峰山峰等等我${gap}男生合唱版`, artist: `小${gap}甜甜`, duration: 180 };
-    assert.deepEqual(await f.searcher.search(hint.title, hint), song);
+    assert.deepEqual(playable(await f.searcher.search(hint.title, hint)), song);
     assert.equal(f.requests.length, 2);
     assert.deepEqual(f.requests[0].body.hint, { title: '山峰山峰等等我 男生合唱版', artist: '小 甜甜', duration: 180 });
     assert.deepEqual(f.requests[1].body, { keyword: '山峰山峰等等我男生合唱版', hint: { title: '山峰山峰等等我男生合唱版', artist: '小甜甜', duration: 180 }, quality: '320k' });
@@ -47,7 +49,7 @@ test('English titles and artists retain word boundaries on the first successful 
 
 test('artist and playlist keywords retry without inventing title hints', async t => {
   const f = fixture(t, (_r, count) => count % 2 ? response(0, null) : response());
-  for (const keyword of ['刘 德华', '抖音 热门榜']) assert.deepEqual(await f.searcher.search(keyword, null), song);
+  for (const keyword of ['刘 德华', '抖音 热门榜']) assert.deepEqual(playable(await f.searcher.search(keyword, null)), song);
   assert.deepEqual(f.requests.map(r => r.body), ['刘 德华', '刘德华', '抖音 热门榜', '抖音热门榜'].map(keyword => ({ keyword, quality: '320k' })));
 });
 
@@ -84,7 +86,7 @@ test('sources remain concurrent and retain configured priority through retry', a
   await flush();
   assert.equal(f.requests.length, 2);
   first.resolve(response(404, null));
-  assert.deepEqual(await pending, song);
+  assert.deepEqual(playable(await pending), song);
   assert.equal(f.requests.length, 3);
 });
 
