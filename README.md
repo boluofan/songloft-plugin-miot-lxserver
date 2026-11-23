@@ -106,7 +106,7 @@ npm run validate    # verify plugin.json hashes
 
 ## 发版节奏
 
-发版由 tag 驱动，流程与北京时间日期/序号规则以[发布](docs/releases.md)为准。
+发版由 tag 驱动，版本是与 tag 一致的 semver（`1.1.0` ↔ `v1.1.0`），流程与进位规则以[发布](docs/releases.md)为准。
 
 ## 作为搜索源接入 miot（供插件开发者）
 

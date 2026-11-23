@@ -1,24 +1,28 @@
 # 发布
 
-发布由 tag 驱动，流程与 `mimusic-jsplugin-audiobook` 一致：本地脚本改版本、提交、打 tag 并推送，CI 只对 `v*` tag 响应。**分支推送不打包、不发版、不占版本号。**
+发布由 tag 驱动，与 `mimusic-jsplugin-audiobook`、`songloft-plugin-karaoke-lyric` 同构：本地脚本改版本、提交、打 tag 并推送，CI 只对 `v*` tag 响应。**分支推送不打包、不发版。**
+
+版本是 semver，与 tag 完全一致（`plugin.json` 写 `1.1.0`，tag 是 `v1.1.0`）。宿主侧也只要求三段数字：`ValidateManifest` 用 `^\d+\.\d+\.\d+` 校验，`checkUpdate` 用字符串不等判断有无更新，没有「降级」概念。
 
 ## 一次发布
 
 ```bash
-npm run release                            # 算出版本、提交、打 tag、推送
+npm run release                            # 默认 patch 自增，1.1.0 → 1.1.1
+npm run release -- --minor                 # 1.1.3 → 1.2.0
+npm run release -- --major                 # 1.1.3 → 2.0.0
 npm run release -- --dry-run               # 只打印将要执行的步骤
 npm run release -- --no-push               # 只在本地产出提交和 tag
-npm run release -- --version 2026.11.23.7  # 指定版本（重发或补号用）
+npm run release -- --version 1.2.0         # 指定版本（重发或补号用）
 ```
 
 `scripts/bump-version.mjs` 依次做四件事：
 
-1. 按北京时间算出版本 `YYYY.M.D.N`：当天首个包为 `.0`，之后取「已有 tag 与清单版本的最大序号」加一；`plugin.json` 里继承自上游的版本也会占住序号，避免与已发布版本撞号。
+1. 算出下一个版本：取「已有 tag 与清单版本」中的最大者，按 `--major` / `--minor` / `--patch`（默认）进位。**清单版本还没有对应 tag 时直接发它本身**——首次改用 semver、或手工调过版本时不会凭空跳过 1.1.0。
 2. 同步写 `package.json` 与 `plugin.json`（`package-lock.json` 按本仓库约定不入库，不改也不提交；`npm ci` 不校验它的 `version` 字段）。
-3. 提交 `chore(release): bump to v…`，打附注 tag `v…`。
+3. 提交 `chore(release): bump to v…`，打附注 tag `v…`；版本号本来就没变（首发）时跳过提交，只打 tag。
 4. `git push origin HEAD:<当前分支> --follow-tags`。
 
-工作区不干净会直接拒绝：打包的是 tag 指向的源码，未提交的改动会漏在包外。`package-lock.json` 与 `src/data/*` 是例外（前者是 npm 的版本号副作用、后者由 prebuild 重新生成），只会打印警告。
+工作区不干净会直接拒绝：打包的是 tag 指向的源码，未提交的改动会漏在包外。`package-lock.json` 与 `src/data/*` 是例外（前者是 npm 的版本号副作用、后者由 prebuild 重新生成），只会打印警告。**本地落后于远端也会拒绝**：CI 发完版会往默认分支回写清单提交，直接发版会在 push 时被拒，脚本在动文件之前就拦住并提示 `git pull --ff-only`。
 
 ## CI 做什么
 
@@ -41,9 +45,9 @@ npm run release -- --version 2026.11.23.7  # 指定版本（重发或补号用�
 - 校验或构建失败：该 tag 不会产生 Release。修好后删除 tag 再重发：
 
   ```bash
-  git tag -d v2026.11.23.1
-  git push origin :refs/tags/v2026.11.23.1
-  npm run release -- --version 2026.11.23.1
+  git tag -d v1.1.1
+  git push origin :refs/tags/v1.1.1
+  npm run release -- --version 1.1.1
   ```
 
 - Release 建好但元数据回写失败：直接重跑工作流（Actions → Release Plugin → Re-run），不会重复上传同一个 Release。
@@ -55,4 +59,4 @@ npm run release -- --version 2026.11.23.7  # 指定版本（重发或补号用�
 node --test tests/release_version.test.mjs   # 版本号与 tag 规则
 ```
 
-换日、序号递增、迁移期三段版本、清单版本占号这些规则由这组用例覆盖，测试不访问网络也不会发布。
+patch/minor/major 进位、首发不跳号、tag 领先时倒挂、非 semver 报错、tag 格式这些规则由这组用例覆盖，测试不访问网络也不会发布。

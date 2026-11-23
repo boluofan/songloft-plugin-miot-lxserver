@@ -92,7 +92,7 @@ Search priority, match threshold, timeout, **direct-link play without import**, 
 
 ## Releases
 
-Releases are tag-driven; the workflow and Beijing date/revision numbering are documented in [releases](docs/en/releases.md).
+Releases are tag-driven; the version is semver matching the tag (`1.1.0` ↔ `v1.1.0`), and the workflow plus bump rules are documented in [releases](docs/en/releases.md).
 
 ## Registering a search provider
 
