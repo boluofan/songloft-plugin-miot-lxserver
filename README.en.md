@@ -59,6 +59,7 @@ Settings → Voice → **Built-in LX Music source (lxserver)**:
 - **User token**: optional (`lx_tk_...`). The plugin resolves the username through `/api/user/auth/verify` and authenticates with a paired `x-user-name` + `x-user-token`; leaving it empty means anonymous access to public sources only.
 - **Default quality**: `320k` (default) / `flac` / `128k`; URL resolution degrades through `flac → 320k → 128k`.
 - **Sources**: kw / kg / tx / wy / mg searched concurrently, ranked and deduplicated by match score.
+- **Online artist queue** (off by default): when the local library has no songs for the requested artist, lxserver fetches a batch of that artist's popular songs and plays the whole queue instead of just the first hit. **Only the `tx` and `wy` sources support artist lookup**; other sources are skipped. If no direct URL can be resolved it falls back to the previous "play only the top-1 track" behaviour. The queue is temporary (nothing is imported), and only the first 2 tracks are resolved before playback starts — the rest are resolved just before they are needed, so a 10-track queue does not delay first playback by several seconds.
 
 Both search response shapes are supported (legacy bare array and v2.1.3+ `{list,...}` object). All field mapping and compatibility fallbacks live in `src/lxserver/provider.ts`, so adapting to future server changes touches one place only.
 

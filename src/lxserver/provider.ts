@@ -5,7 +5,7 @@
 /// <reference types="@songloft/plugin-sdk" />
 
 import { LxServerClient } from './client';
-import type { LXServerConfig, LXTrack } from './types';
+import type { LXArtist, LXPlayableUrl, LXServerConfig, LXTrack } from './types';
 import type { OnlineSearchResult } from '../voicecmd/online_searcher';
 
 /** 与 online_searcher 的 hint 对齐 */
@@ -31,6 +31,24 @@ function includesLoose(actual: string, expected: string): boolean {
   return a.includes(e) || e.includes(a);
 }
 
+/** lxserver 能力矩阵：只有 tx/wy 支持 type=singer 与 artistSongs（kw/kg/mg 会返回 500） */
+const ARTIST_SOURCES = new Set(['tx', 'wy']);
+
+/** 歌手名匹配分：精确名 > 包含名；同档再用专辑数体现流行度（避免选到同名小号） */
+function artistMatchScore(artist: LXArtist, target: string): number {
+  const names = [artist.name, ...artist.aliases].map(normalizeText).filter(Boolean);
+  if (names.some((n) => n === target)) return 100;
+  let score = 0;
+  for (const n of names) {
+    if (!n.includes(target) && !target.includes(n)) continue;
+    // 包含匹配按「多出的字数」打折：「G.E.M.邓紫棋」应优于「邓紫棋粉丝团」，
+    // 否则只按专辑数排序会选中粉丝号/翻唱号。
+    const extra = Math.abs(n.length - target.length);
+    score = Math.max(score, Math.max(10, 50 - extra * 2));
+  }
+  return score;
+}
+
 /** 候选匹配打分：优先歌名+歌手都吻合，其次仅歌名/仅歌手吻合；时长接近加分 */
 function matchScore(track: LXTrack, hint: LXSearchHint | null): number {
   if (!hint) return 50;
@@ -53,6 +71,23 @@ function matchScore(track: LXTrack, hint: LXSearchHint | null): number {
 
 /** 未命中原因：供设置页测试区分「源没结果」与「候选被过滤」 */
 export type LXMissReason = 'no_candidates' | 'below_threshold' | 'no_playable_url' | 'error' | null;
+
+/** 歌手队列条目：直链按需解析，playable 为空表示「还没解析」 */
+export interface LXQueueItem {
+  track: LXTrack;
+  playable?: LXPlayableUrl;
+}
+
+/** 在线歌手队列解析结果 */
+export interface LXArtistQueue {
+  /** 实际命中的歌手名（lxserver 返回的，可能是别名/繁简差异） */
+  artistName: string;
+  /** 命中来源（tx/wy），仅用于日志定位 */
+  source: string;
+  /** 该歌手在源上可用的歌曲总数（未按 limit 截断） */
+  total: number;
+  items: LXQueueItem[];
+}
 
 /** 直链可播性：音箱（player_play_url）只可靠播放 mp3；其余交给播放链路的转码代理。
  *  这里保留原样 URL，由 playSearchResult → resolveDirectPushUrl 统一处理转码。 */
@@ -150,6 +185,108 @@ export class LxServerProvider {
     this.lastMissReason = 'no_playable_url';
     songloft.log.warn('[LxServerProvider] no playable url for: ' + clean);
     return null;
+  }
+
+  /**
+   * 在线歌手队列：歌手名 → 该歌手热门歌曲列表。仅 tx/wy 支持（其他源调 type=singer 直接 500）。
+   *
+   * 只解析前 `preResolve` 首的直链：artistSongs 本身 1.7~2s，再逐首串行解析 /api/music/url
+   * 会把首播推迟到数秒。其余曲目保持「未解析」交给播放链路临播前按需补
+   * （见 OnlineSearcher.searchArtistQueue 的 resolveUrl / 播放器懒解析钩子）。
+   *
+   * 未命中时把原因写进 lastMissReason，设置页/日志可据此区分「源不支持」「没有这个歌手」
+   * 「找到了但解析不出直链」。
+   */
+  async artistQueue(name: string, limit = 10, preResolve = 2): Promise<LXArtistQueue | null> {
+    this.lastMissReason = null;
+    if (!this.isConfigured()) return null;
+    const target = normalizeText(name);
+    if (!target) return null;
+
+    // 只在支持歌手能力的源里找，保持用户配置的 sources 顺序（先配的源优先）。
+    const sources = this.cfg.sources.filter((s) => ARTIST_SOURCES.has(s));
+    if (sources.length === 0) {
+      this.lastMissReason = 'no_candidates';
+      songloft.log.info('[LxServerProvider] artist queue: no tx/wy source enabled, skip');
+      return null;
+    }
+
+    let best: { artist: LXArtist; score: number } | null = null;
+    let bestSongs: LXTrack[] = [];
+    for (const source of sources) {
+      let songs: LXTrack[] = [];
+      let pick: { artist: LXArtist; score: number } | null = null;
+      try {
+        const artists = await this.client.searchSingers(source, target, 10);
+        const ranked = artists
+          .map((artist) => ({ artist, score: artistMatchScore(artist, target) }))
+          .filter((r) => r.score > 0)
+          // 同名档内用专辑数体现流行度，避免选中同名的翻唱号/小号
+          .sort((a, b) => b.score - a.score || b.artist.albumSize - a.artist.albumSize);
+        if (ranked.length > 0) {
+          pick = ranked[0];
+          songs = (await this.client.artistSongs(source, pick.artist.id, 'hot'))
+            .filter((t) => !!t.id && !!t.name);
+        }
+      } catch (e) {
+        songloft.log.warn(`[LxServerProvider] artist queue ${source} failed: ${String(e)}`);
+        continue;
+      }
+      if (!pick || songs.length === 0) continue;
+      // 精确同名歌手直接采纳，不再往下试源。
+      if (!best || pick.score > best.score) {
+        best = pick;
+        bestSongs = songs;
+      }
+      if (pick.score >= 100) break;
+    }
+
+    if (!best || bestSongs.length === 0) {
+      this.lastMissReason = 'no_candidates';
+      songloft.log.info('[LxServerProvider] artist queue: no artist matched for ' + name);
+      return null;
+    }
+
+    const take = Math.max(1, Math.min(50, limit));
+    const picked = bestSongs.slice(0, take);
+    const items: LXQueueItem[] = picked.map((track) => ({ track }));
+
+    // 首批并发解析（失败隔离）：任何一首失败都不影响其余，未解析的临播时再补。
+    await Promise.all(
+      items.slice(0, Math.max(0, Math.min(take, preResolve))).map(async (item) => {
+        try {
+          item.playable = await this.client.resolveUrlLadder(item.track.raw);
+        } catch (e) {
+          songloft.log.warn(
+            `[LxServerProvider] artist queue url failed for ${item.track.name}: ${String(e)}`,
+          );
+        }
+      }),
+    );
+
+    const playableCount = items.filter((i) => !!i.playable).length;
+    if (playableCount === 0) {
+      // 一首都解析不出来说明源侧没可用音源（或自定义源未配），交给上层回退单曲兜底。
+      this.lastMissReason = 'no_playable_url';
+      songloft.log.warn('[LxServerProvider] artist queue: no playable url in first batch for ' + name);
+      return null;
+    }
+
+    songloft.log.info(
+      `[LxServerProvider] artist queue "${best.artist.name}" source=${best.artist.source} ` +
+      `songs=${bestSongs.length} take=${items.length} preResolved=${playableCount}`,
+    );
+    return {
+      artistName: best.artist.name,
+      source: String(best.artist.source),
+      total: bestSongs.length,
+      items,
+    };
+  }
+
+  /** 按需解析单首直链（歌手队列懒解析用；失败由调用方跳过该首） */
+  async resolveTrackUrl(track: LXTrack): Promise<LXPlayableUrl> {
+    return this.client.resolveUrlLadder(track.raw);
   }
 
   /** 连通性测试：探活 + 鉴权态，供设置页调用 */

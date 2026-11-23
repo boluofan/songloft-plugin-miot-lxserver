@@ -70,6 +70,7 @@ export interface LXServerConfig {
   sources: string[];
   searchTimeout: number;
   urlTimeout: number;
+  artist_queue_enabled: boolean;
 }
 
 export interface SearchSource {

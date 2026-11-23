@@ -1323,7 +1323,7 @@ export class MusicCommandService {
 
     if (!(await this.indexingManager.waitForReady(INDEX_READY_WAIT_MS))) {
       songloft.log.warn('[MusicCommandService] Index not ready for play_artist');
-      return this.playExternalFallback(cleanArtist, pm, accountId, deviceId, `未找到歌手${cleanArtist}的歌曲`);
+      return this.playArtistExternalFallback(cleanArtist, pm, accountId, deviceId, `未找到歌手${cleanArtist}的歌曲`);
     }
 
     // findSongsByArtist 只遍历歌单歌曲缓存，缓存未就绪时必然返回空、被误报成
@@ -1333,7 +1333,7 @@ export class MusicCommandService {
     const artistLocs = this.indexingManager.findSongsByArtist(cleanArtist);
     if (artistLocs.length === 0) {
       songloft.log.warn(`[MusicCommandService] No songs found for artist: ${cleanArtist} (playlistCacheReady=${this.indexingManager.isPlaylistCacheReady()})`);
-      return this.playExternalFallback(cleanArtist, pm, accountId, deviceId, `未找到歌手${cleanArtist}的歌曲`);
+      return this.playArtistExternalFallback(cleanArtist, pm, accountId, deviceId, `未找到歌手${cleanArtist}的歌曲`);
     }
 
     songloft.log.info(`[MusicCommandService] play_artist: found ${artistLocs.length} songs for "${cleanArtist}"`);
@@ -1367,7 +1367,7 @@ export class MusicCommandService {
 
     if (fullSongs.length === 0) {
       songloft.log.warn(`[MusicCommandService] play_artist: no playable songs found for "${cleanArtist}"`);
-      return this.playExternalFallback(cleanArtist, pm, accountId, deviceId, `加载歌手${cleanArtist}的歌曲失败，外部搜索未找到可播放歌曲`);
+      return this.playArtistExternalFallback(cleanArtist, pm, accountId, deviceId, `加载歌手${cleanArtist}的歌曲失败，外部搜索未找到可播放歌曲`);
     }
 
     const startIndex = Math.floor(Math.random() * fullSongs.length);
@@ -1408,6 +1408,103 @@ export class MusicCommandService {
     }
     await this.minaService.textToSpeech(accountId, deviceId, failureText);
     return null;
+  }
+
+  /**
+   * 本地没有该歌手时的在线兜底（歌手语义专用）：
+   *   1. 内置 lxserver 在线歌手队列（需开 artist_queue_enabled，仅 tx/wy 支持）→ 整队播放；
+   *   2. 队列不可用 / 解析失败 → 回退原「只搜 top-1 单曲」逻辑，外部 topone 源行为不变。
+   */
+  private async playArtistExternalFallback(
+    artistName: string,
+    pm: PlaylistManager,
+    accountId: string,
+    deviceId: string,
+    failureText: string,
+  ): Promise<PlayedSong | null> {
+    const queued = await this.tryOnlineArtistQueue(artistName, pm, accountId, deviceId);
+    if (queued) return queued;
+    return this.playExternalFallback(artistName, pm, accountId, deviceId, failureText);
+  }
+
+  /**
+   * 用内置 lxserver 播放该歌手的多首热门歌（临时队列，不入库）。
+   *
+   * 队列里只有前 2 首带直链，其余靠 pm 的懒解析钩子在临播前补——首播等待因此从
+   * 「N 首解析之和」降到「歌手搜索 + 2 首解析」的量级。
+   */
+  private async tryOnlineArtistQueue(
+    artistName: string,
+    pm: PlaylistManager,
+    accountId: string,
+    deviceId: string,
+  ): Promise<PlayedSong | null> {
+    let enabled = false;
+    try {
+      enabled = (await this.configManager.getConfig()).lxserver?.artist_queue_enabled === true;
+    } catch (e) {
+      songloft.log.warn('[MusicCommandService] read artist_queue_enabled failed: ' + String(e));
+      return null;
+    }
+    if (!enabled) return null;
+
+    songloft.log.warn(`[MusicCommandService] No local songs for artist "${artistName}", trying lxserver artist queue`);
+    const started = Date.now();
+    // 歌手搜索 + artistSongs 要 2s 上下：先出一句提示，避免用户以为没反应；
+    // 与搜索并行（Promise.all），提示本身不多花时间。
+    const ttsTask = this.minaService
+      .textToSpeech(accountId, deviceId, `正在加载歌手${artistName}的歌曲`)
+      .catch((e) => { songloft.log.warn('[MusicCommandService] artist queue TTS failed: ' + String(e)); });
+
+    const [queue] = await Promise.all([
+      this.onlineSearcher.searchArtistQueue(artistName, { limit: 10, preResolve: 2 }),
+      ttsTask,
+    ]);
+    if (!queue || queue.items.length === 0) {
+      songloft.log.warn(`[MusicCommandService] lxserver artist queue empty for "${artistName}" (${Date.now() - started}ms)`);
+      return null;
+    }
+
+    const indexOf = new Map<any, number>();
+    const songs: any[] = queue.items.map((item, index) => {
+      const song: any = {
+        id: 0, // 不入库的临时直链：不写曲库、也不发已播放/收藏请求
+        title: item.title,
+        artist: item.artist,
+        album: item.album || '',
+        duration: item.duration || 0,
+        cover_url: item.cover_url || '',
+        // 首批已解析的带上直链，起播不必等钩子；其余留空由钩子临播补。
+        url: queue.peekUrl(index),
+        type: 'remote',
+      };
+      indexOf.set(song, index);
+      return song;
+    });
+
+    pm.setSongUrlResolver(async (song) => {
+      const index = indexOf.get(song);
+      return index === undefined ? '' : queue.resolveUrl(index);
+    });
+
+    pm.setAnnounceOnSongChange(true);
+    const ok = await pm.playWithSongs(songs, 0, 'order', `歌手: ${queue.artistName}`, '', undefined, false);
+    if (!ok) {
+      songloft.log.warn(`[MusicCommandService] lxserver artist queue playback failed for "${artistName}"`);
+      pm.setSongUrlResolver(null);
+      return null;
+    }
+
+    const current = pm.getCurrentSong();
+    songloft.log.info(
+      `[MusicCommandService] lxserver artist queue playing: artist="${queue.artistName}" ` +
+      `total=${queue.total} queue=${songs.length} firstIn=${Date.now() - started}ms`,
+    );
+    return {
+      songId: current?.id,
+      songName: current?.title || artistName,
+      artist: current?.artist || queue.artistName,
+    };
   }
 
   private normalizeSearchPriority(priority: unknown): SearchPriority {

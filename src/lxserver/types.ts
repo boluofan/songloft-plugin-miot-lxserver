@@ -27,6 +27,7 @@ export function defaultLXServerConfig(): LXServerConfig {
     sources: [...DEFAULT_LX_SOURCES],
     searchTimeout: 6,
     urlTimeout: 12,
+    artist_queue_enabled: false,
   };
 }
 
@@ -52,6 +53,7 @@ export function normalizeLXServerConfig(raw: Partial<LXServerConfig> | null | un
     sources: sources.length > 0 ? sources : [...DEFAULT_LX_SOURCES],
     searchTimeout: clampTimeout(raw.searchTimeout, d.searchTimeout, 1, 30),
     urlTimeout: clampTimeout(raw.urlTimeout, d.urlTimeout, 3, 60),
+    artist_queue_enabled: raw.artist_queue_enabled === true,
   };
 }
 
@@ -69,6 +71,16 @@ export interface LXTrack {
   quality: string;
   /** lxserver 搜索原样返回的完整对象，POST /api/music/url 必须回传它 */
   raw: Record<string, unknown>;
+}
+
+/** lxserver 歌手搜索条目（type=singer） */
+export interface LXArtist {
+  id: string;
+  name: string;
+  cover: string;
+  aliases: string[];
+  albumSize: number;
+  source: LXSource | string;
 }
 
 /** 解析出的可播放直链 */

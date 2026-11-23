@@ -136,6 +136,7 @@ function normalizeLXServerSettings(
     sources: sources.length > 0 ? sources : fallback.sources,
     searchTimeout: clamp(stored.searchTimeout, fallback.searchTimeout, 1, 30),
     urlTimeout: clamp(stored.urlTimeout, fallback.urlTimeout, 3, 60),
+    artist_queue_enabled: stored.artist_queue_enabled === true,
   };
 }
 
@@ -150,6 +151,7 @@ function defaultLXServerSettings(): import('../types').LXServerSettings {
     sources: ['kw', 'kg', 'tx', 'wy', 'mg'],
     searchTimeout: 6,
     urlTimeout: 12,
+    artist_queue_enabled: false,
   };
 }
 

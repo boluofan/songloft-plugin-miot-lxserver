@@ -13,6 +13,7 @@ import type { ExternalSearchSource } from '../types';
 import type { PlaylistManager } from '../player/manager';
 import { LxServerProvider } from '../lxserver/provider';
 import type { LXMissReason } from '../lxserver/provider';
+import type { LXArtistQueue } from '../lxserver/provider';
 import { normalizeLXServerConfig } from '../lxserver/types';
 
 // 外部搜索 API 请求体
@@ -44,6 +45,26 @@ export interface OnlineSearchDiagnosis {
   result: OnlineSearchResult | null;
   reason: string;
 }
+
+/**
+ * 在线歌手队列（仅内置 lxserver）。
+ *
+ * 首播只等前 `preResolve` 首的直链：artistSongs 约 1.7~2s，逐首解析 10 首会把首播推迟到
+ * 数秒，所以其余曲目先拿元数据占位，等真的快播到它们时再解析（见 resolveUrl 的 lookahead）。
+ */
+export interface OnlineArtistQueue {
+  /** 实际命中的歌手名 */
+  artistName: string;
+  /** 该歌手在源上的可用歌曲总数（未按 limit 截断），仅用于日志 */
+  total: number;
+  /** 队列（顺序即热门度），url 字段不填充：这些曲目走「不入库直推」，由 resolveUrl 现取 */
+  items: OnlineSearchResult[];
+  /** 已解析好的音箱可播 URL；未解析返回 ''（供首发直接起播，避免多一次 await） */
+  peekUrl: (index: number) => string;
+  /** 懒解析第 index 首，返回音箱可播 URL（内部按需解析直链 + 转码代理） */
+  resolveUrl: (index: number) => Promise<string>;
+}
+
 
 // 外部搜索 API 响应
 interface SearchOneResponse {
@@ -264,6 +285,104 @@ export class OnlineSearcher {
     }
     songloft.log.warn('[OnlineSearcher] No source matched for keyword: ' + keyword);
     return null;
+  }
+
+  /**
+   * 在线歌手队列：只用内置 lxserver 搜「该歌手的多首热门歌」，供「播放歌手X」在本地
+   * 没有该歌手时整队播放。外部 topone 源不参与（保持原先 top-1 单曲语义）。
+   *
+   * 延迟策略（懒解析）：
+   *   1. 歌手搜索 + artistSongs 一次拿全量元数据（~2s），只解析前 preResolve 首直链；
+   *   2. 真正播放到第 N 首时才解析第 N 首，并顺势预解析 N+1、N+2（lookahead），
+   *      于是每首的解析都藏在上一首的播放时间里，首播等待从「N 首之和」降到「2 首」。
+   */
+  async searchArtistQueue(
+    artistName: string,
+    opts?: { limit?: number; preResolve?: number },
+  ): Promise<OnlineArtistQueue | null> {
+    const name = (artistName || '').replace(/\s+/g, ' ').trim();
+    if (!name) return null;
+
+    const provider = await this.getLxProvider();
+    if (!provider || !provider.isConfigured()) return null;
+
+    const limit = Math.max(1, Math.min(20, opts?.limit ?? 10));
+    const preResolve = Math.max(1, Math.min(limit, opts?.preResolve ?? 2));
+    let queue: LXArtistQueue | null;
+    try {
+      queue = await provider.artistQueue(name, limit, preResolve);
+    } catch (e) {
+      songloft.log.warn('[OnlineSearcher] lxserver artist queue error: ' + String(e));
+      return null;
+    }
+    if (!queue || queue.items.length === 0) return null;
+
+    // 已解析好的「音箱可播 URL」缓存（直链 → 必要时转码代理），避免重复解析/重复转码。
+    const resolved = new Map<number, string>();
+    const inflight = new Map<number, Promise<string>>();
+    // 不递归的 lookahead：解析 i 时预解析 i+1/i+2，但那两首不再继续往后推。
+    const resolveOne = async (index: number, lookahead: boolean): Promise<string> => {
+      if (index < 0 || index >= queue.items.length) return '';
+      const cached = resolved.get(index);
+      if (cached) return cached;
+      let pending = inflight.get(index);
+      if (!pending) {
+        pending = (async () => {
+          const item = queue.items[index];
+          const playable = item.playable ?? (item.playable = await provider.resolveTrackUrl(item.track));
+          const pushUrl = await this.resolveDirectPushUrl(playable.url, item.track.duration);
+          resolved.set(index, pushUrl);
+          return pushUrl;
+        })().finally(() => inflight.delete(index));
+        inflight.set(index, pending);
+      }
+      const url = await pending;
+      if (lookahead) {
+        void resolveOne(index + 1, false).catch(() => undefined);
+        void resolveOne(index + 2, false).catch(() => undefined);
+      }
+      return url;
+    };
+
+    // 首批：provider 已解析直链，这里只需补转码代理判定（不发网络请求）。
+    await Promise.all(
+      queue.items.slice(0, preResolve).map(async (item, index) => {
+        if (!item.playable) return;
+        try {
+          const pushUrl = await this.resolveDirectPushUrl(item.playable.url, item.track.duration);
+          if (pushUrl) resolved.set(index, pushUrl);
+        } catch { /* 单首失败不影响队列 */ }
+      }),
+    );
+
+    if (resolved.size === 0) {
+      songloft.log.warn('[OnlineSearcher] lxserver artist queue: no playable url after pre-resolve');
+      return null;
+    }
+
+    const items: OnlineSearchResult[] = queue.items.map((item) => ({
+      title: item.track.name,
+      artist: item.track.singer || queue.artistName,
+      album: item.track.album || undefined,
+      duration: item.track.duration || undefined,
+      cover_url: item.track.cover || undefined,
+      dedup_key: `lxserver:${item.track.source}:${item.track.id}`,
+      source_data: { platform: item.track.source, quality: item.playable?.type || '' },
+      hit_source: 'lxserver',
+    }));
+
+    songloft.log.info(
+      `[OnlineSearcher] lxserver artist queue "${queue.artistName}" total=${queue.total} ` +
+      `take=${items.length} preResolved=${resolved.size}`,
+    );
+
+    return {
+      artistName: queue.artistName,
+      total: queue.total,
+      items,
+      peekUrl: (index: number) => resolved.get(index) || '',
+      resolveUrl: (index: number) => resolveOne(index, true),
+    };
   }
 
   /**

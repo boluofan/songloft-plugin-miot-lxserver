@@ -451,6 +451,11 @@ export class PlaylistManager {
   private tempArtistQuery: string = ''; // 临时歌手歌单的原始搜索词，用于持久化和恢复
   private tempArtistExact = false;
   private tempStartSongId = 0;
+  // 在线歌手队列的懒解析钩子：临时队列里 url 为空的曲目在起播前调它补直链。
+  // 在线音源（lxserver）解析一首要 200~400ms，10 首串起来首播要等数秒，所以队列先拿
+  // 元数据占位、只在临播时解析当前首（并预解析后两首）。只在 playWithSongs 的临时队列
+  // 上有意义；换队列后由调用方覆盖，旧闭包对未知歌曲返回 '' 即退化为原行为。
+  private songUrlResolver: ((song: Song) => Promise<string>) | null = null;
   private pendingTempArtist: string = ''; // 待恢复的临时歌手名（索引就绪后自动恢复）
   private _lastLoadNotFound: boolean = false; // 上次 loadPlaylistSongs 失败是否因歌单不存在(ID 过期)
   private hardStopped: boolean = false; // 上次暂停被设备忽略而升级为 stop：设备端已无媒体上下文，续播需重推 URL
@@ -646,6 +651,16 @@ export class PlaylistManager {
       songloft.log.warn('[PlaylistManager] Failed to read playlist play mode: ' + String(e));
     }
     return audiobook ? 'order' : this.playMode;
+  }
+
+  /**
+   * 注册「起播前补直链」的懒解析钩子（在线歌手队列用）。
+   *
+   * 传 null 解除。钩子只在当前曲目 `url` 为空时被调用，返回值写回 song.url 后继续正常起播；
+   * 返回空串或抛错都按「这首播不了」处理，走既有的跳过/失败链路，不影响队列其余歌曲。
+   */
+  setSongUrlResolver(fn: ((song: Song) => Promise<string>) | null): void {
+    this.songUrlResolver = fn;
   }
 
   /**
@@ -1866,6 +1881,17 @@ export class PlaylistManager {
     this.clearPendingNextIndex();
 
     const song = this.songs[this.currentIndex];
+
+    // 在线歌手队列：曲目只有元数据、直链临播才解析。补不上就让后面的 buildSongURL 失败，
+    // 由既有的「起播失败 → 跳过下一首」链路兜住，不会卡住整队。
+    if (!song.url && this.songUrlResolver) {
+      const resolvedUrl = await this.songUrlResolver(song).catch((e) => {
+        songloft.log.warn(`[PlaylistManager] Lazy url resolve failed song="${song.title}": ${String(e)}`);
+        return '';
+      });
+      if (resolvedUrl) song.url = resolvedUrl;
+      if (!isCurrent()) return false;
+    }
 
     // 已进入实际起播，先作废这首歌的旧预取，避免稍后超时污染正在播放的歌曲。
     this.prefetchRequests.delete(song.id);

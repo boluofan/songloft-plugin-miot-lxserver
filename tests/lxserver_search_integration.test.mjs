@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { loader } from './chat_loader.mjs';
+import { loader, flush } from './chat_loader.mjs';
 
 // 加载真实 OnlineSearcher + 真实 LxServerProvider/Client，仅 mock 全局依赖与 fetch
 const load = loader({
@@ -180,4 +180,107 @@ test('searchWithDiagnosis：候选存在但不匹配时说明匹配度不足', a
   const missed = await searcher.searchWithDiagnosis('稻香', { title: '稻香' });
   assert.equal(missed.result, null);
   assert.match(missed.reason, /匹配度不足/);
+});
+
+// ===== 在线歌手队列（懒解析） =====
+
+const lxArtist = (overrides = {}) => ({
+  id: '7763', name: 'G.E.M.邓紫棋', picUrl: 'http://y.gtimg.cn/a.jpg',
+  alias: [], albumSize: 30, source: 'wy', ...overrides,
+});
+const lxArtistSong = (i) => ({
+  name: `歌${i}`, singer: 'G.E.M.邓紫棋', source: 'wy', songmid: `m${i}`,
+  interval: '03:30', img: 'https://img.test/a.jpg', types: [{ type: '320k' }],
+});
+
+/** 歌手队列 fixture：sources 默认含 wy/tx，artistSongs 返回 count 首 */
+function artistFixture(t, { lx = lxConfig({ sources: ['wy', 'tx'] }), artists = [lxArtist()], count = 6, urlHandler } = {}) {
+  let urlCalls = 0;
+  const built = fixture(t, {
+    lx,
+    handler: (url, init) => {
+      if (url.includes('/api/music/search')) return jsonResp(artists);
+      if (url.includes('/api/music/artistSongs')) {
+        return jsonResp(Array.from({ length: count }, (_, i) => lxArtistSong(i + 1)));
+      }
+      if (url.includes('/api/music/url')) {
+        urlCalls += 1;
+        if (urlHandler) return urlHandler(url, init);
+        const body = JSON.parse(init?.body || '{}');
+        return jsonResp({ url: `https://audio.test/${body.songInfo?.name || 'x'}.mp3`, type: '320k' });
+      }
+      return jsonResp([]);
+    },
+  });
+  return { ...built, urlCalls: () => urlCalls, requests: built.requests };
+}
+
+test('searchArtistQueue：命中歌手返回队列，只预解析前 2 首直链', async t => {
+  const { searcher, requests } = artistFixture(t, { count: 6 });
+  const queue = await searcher.searchArtistQueue('邓紫棋');
+  assert.ok(queue, '应返回队列');
+  assert.equal(queue.artistName, 'G.E.M.邓紫棋');
+  assert.equal(queue.total, 6);
+  assert.equal(queue.items.length, 6);
+  assert.equal(queue.items[0].title, '歌1');
+  assert.equal(queue.items[0].hit_source, 'lxserver');
+  assert.equal(queue.items[0].url, undefined, '队列项不带直链，走懒解析');
+
+  const urlCalls = requests.filter(r => r.url.includes('/api/music/url')).length;
+  assert.equal(urlCalls, 2, '首播只解析前 2 首，不解析整队');
+
+  assert.match(queue.peekUrl(0), /\.mp3$/, '首批已解析可直接起播');
+  assert.equal(queue.peekUrl(2), '', '第 3 首尚未解析');
+});
+
+test('searchArtistQueue：解析到第 N 首时才解析该首，并顺带预解析后 2 首', async t => {
+  const { searcher, requests } = artistFixture(t, { count: 6 });
+  const queue = await searcher.searchArtistQueue('邓紫棋');
+  assert.equal(requests.filter(r => r.url.includes('/api/music/url')).length, 2);
+
+  const third = await queue.resolveUrl(2);
+  assert.match(third, /歌3\.mp3$/);
+  await flush();
+  const afterThird = requests.filter(r => r.url.includes('/api/music/url')).length;
+  assert.equal(afterThird, 5, '第 3 首 + lookahead 第 4/5 首 = 5 次解析');
+  assert.match(queue.peekUrl(3), /歌4\.mp3$/, 'lookahead 已把第 4 首预热好');
+  assert.equal(queue.peekUrl(5), '', '不越界预解析第 6 首');
+
+  // 已解析的不重复请求
+  await queue.resolveUrl(2);
+  await flush();
+  assert.equal(requests.filter(r => r.url.includes('/api/music/url')).length, 5);
+});
+
+test('searchArtistQueue：歌手名精确匹配优先于包含匹配/高热度号', async t => {
+  const { searcher, requests } = artistFixture(t, {
+    artists: [
+      lxArtist({ id: 'fan', name: 'G.E.M.邓紫棋粉丝团', albumSize: 999 }),
+      lxArtist({ id: '7763', name: 'G.E.M.邓紫棋', albumSize: 10 }),
+    ],
+    count: 3,
+  });
+  await searcher.searchArtistQueue('邓紫棋');
+  const artistCall = requests.find(r => r.url.includes('/api/music/artistSongs'));
+  assert.ok(artistCall, '应调用 artistSongs');
+  assert.match(artistCall.url, /id=7763/, '选精确同名歌手');
+});
+
+test('searchArtistQueue：源不支持歌手能力时返回 null 且不请求 artistSongs', async t => {
+  const { searcher, requests } = artistFixture(t, { lx: lxConfig({ sources: ['kw'] }) });
+  assert.equal(await searcher.searchArtistQueue('邓紫棋'), null);
+  assert.ok(requests.every(r => !r.url.includes('/api/music/artistSongs')), 'kw 不支持歌手搜索，直接跳过');
+});
+
+test('searchArtistQueue：首批直链全部解析失败时返回 null（交给单曲兜底）', async t => {
+  const { searcher } = artistFixture(t, {
+    count: 4,
+    urlHandler: () => jsonResp({ error: '音源解析失败' }, 500),
+  });
+  assert.equal(await searcher.searchArtistQueue('邓紫棋'), null);
+});
+
+test('searchArtistQueue：lxserver 未启用时返回 null', async t => {
+  const { searcher } = artistFixture(t, { lx: lxConfig({ enabled: false, sources: ['wy'] }) });
+  assert.equal(await searcher.searchArtistQueue('邓紫棋'), null);
 });

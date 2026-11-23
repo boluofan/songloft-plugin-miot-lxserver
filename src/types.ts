@@ -221,6 +221,8 @@ export interface LXServerSettings {
   sources: string[];
   searchTimeout: number;
   urlTimeout: number;
+  /** 本地没有该歌手时，是否用内置 lxserver 播放该歌手的热门歌曲队列（仅 tx/wy 支持） */
+  artist_queue_enabled: boolean;
 }
 
 // ===== 定时任务 =====

@@ -11,6 +11,7 @@
 
 import {
   LxError,
+  type LXArtist,
   type LXAuthState,
   type LXPlayableUrl,
   type LXQuality,
@@ -256,6 +257,39 @@ export class LxServerClient {
       this.cfg.searchTimeout * 1000,
     );
     const list = unwrapSearchList<Record<string, unknown>>(r, 'search/song');
+    return list.map((item) => this.toTrack(item));
+  }
+
+  /** 歌手搜索：GET /api/music/search?type=singer。仅 tx/wy 支持，其他源由 lxserver 返回 500。 */
+  async searchSingers(source: string, name: string, limit = 10): Promise<LXArtist[]> {
+    const q = new URLSearchParams({ name, source, type: 'singer', page: '1', limit: String(limit) });
+    const r = await this.reqJSON<unknown>(
+      `/api/music/search?${q.toString()}`,
+      { method: 'GET' },
+      this.cfg.searchTimeout * 1000,
+    );
+    const list = unwrapSearchList<Record<string, unknown>>(r, 'search/singer');
+    return list
+      .map((item) => ({
+        id: String(item.id ?? item.mid ?? ''),
+        name: String(item.name ?? ''),
+        cover: normalizeCover(String(item.picUrl ?? item.img ?? item.cover ?? '')),
+        aliases: Array.isArray(item.alias) ? item.alias.map((v) => String(v)) : [],
+        albumSize: Number(item.albumSize ?? 0) || 0,
+        source: String(item.source ?? source),
+      }))
+      .filter((artist) => !!artist.id && !!artist.name);
+  }
+
+  /** 歌手歌曲：GET /api/music/artistSongs。服务端一次返回该歌手全部歌曲（受 artist.maxFetchPages 限制）。 */
+  async artistSongs(source: string, id: string, order = 'hot'): Promise<LXTrack[]> {
+    const q = new URLSearchParams({ id, source, order });
+    const r = await this.reqJSON<unknown>(
+      `/api/music/artistSongs?${q.toString()}`,
+      { method: 'GET' },
+      this.cfg.urlTimeout * 1000,
+    );
+    const list = unwrapSearchList<Record<string, unknown>>(r, 'artistSongs');
     return list.map((item) => this.toTrack(item));
   }
 

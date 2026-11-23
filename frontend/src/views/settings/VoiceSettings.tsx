@@ -1927,6 +1927,19 @@ export default function VoiceSettings(props: any) {
               }}
             ></SlSwitch>
           </SettingRow>
+          <SettingRow
+            title="在线歌手队列"
+            subtitle="本地没有该歌手时，用 lxserver 播他的一批热门歌（仅 tx / wy 音源支持，首播先解析前 2 首）。关闭则只播搜到的第一首"
+          >
+            <SlSwitch
+              aria-label="在线歌手队列"
+              modelValue={vm.state.config.lxserver.artist_queue_enabled}
+              disabled={!vm.state.config.lxserver.enabled}
+              onUpdateModelValue={($event: any) => {
+                vm.saveLxserver({ artist_queue_enabled: !!$event });
+              }}
+            ></SlSwitch>
+          </SettingRow>
           <NativeView className="form-body">
             <NativeView className="field">
               <NativeView className="field-label"><text>服务地址</text></NativeView>

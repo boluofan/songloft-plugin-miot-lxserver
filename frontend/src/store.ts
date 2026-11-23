@@ -76,6 +76,7 @@ const defaultConfig: MiotConfig = {
     sources: ["kw", "kg", "tx", "wy", "mg"],
     searchTimeout: 6,
     urlTimeout: 12,
+    artist_queue_enabled: false,
   },
 };
 
