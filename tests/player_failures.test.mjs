@@ -8,8 +8,13 @@ import test from "node:test";
 const require = createRequire(import.meta.url);
 const ts = require("typescript");
 
+// 同一模块只加载一次：本文件会从多条路径 require 同一个模块（如 music/service 被
+// coordinator 再 require 一次），没有缓存时第二次会拿不到依赖表而 assert 失败。
+const sourceCache = new Map();
 function loadSource(path, dependencies) {
-  const source = readFileSync(new URL(path, import.meta.url), "utf8");
+  const key = new URL(path, import.meta.url).href;
+  if (sourceCache.has(key)) return sourceCache.get(key);
+  const source = readFileSync(new URL(key), "utf8");
   const { outputText } = ts.transpileModule(source, {
     compilerOptions: {
       module: ts.ModuleKind.CommonJS,
@@ -17,6 +22,8 @@ function loadSource(path, dependencies) {
     },
   });
   const exports = {};
+  // 先登记再执行：循环依赖时第二次 require 能拿到同一个对象
+  sourceCache.set(key, exports);
   new Function("require", "exports", outputText)((name) => {
     if (name === "./playlist_page") {
       return {
@@ -32,9 +39,23 @@ function loadSource(path, dependencies) {
     }
     if (name.endsWith("/song_match"))
       return loadDependency("../src/indexing/song_match.ts");
+    // 播放失败路径不涉及 lxserver 解析；这些模块只是被懒加载点到，给最小替身，
+    // 避免测试结束后才触发的异步 require 把整个文件判失败。
+    if (name.startsWith("../lxserver/"))
+      return {
+        normalizeLXServerConfig: value => value || {},
+        LxServerProvider: class { },
+        decodeAnyRef: () => null,
+        buildSongRef: () => ({}),
+        buildToponeRef: () => ({}),
+        isOwnSongRef: () => false,
+        toponeDedupKey: () => "",
+        PLUGIN_ENTRY_PATH: "miot",
+      };
     assert.ok(
       Object.hasOwn(dependencies, name),
-      `unexpected dependency: ${name}`,
+      // 带上宿主模块路径：同一条链会有多层 require，只报依赖名定位不到是谁要的
+      `unexpected dependency: ${name} (required from ${path})`,
     );
     return dependencies[name];
   }, exports);
@@ -3817,6 +3838,8 @@ const { registerConfigHandlers } = loadSource('../src/handlers/config.ts', {
   '@songloft/plugin-sdk': { jsonResponse: (value, status = 200) => ({ ...value, status }) },
   '../config/manager': {}, '../conversation/monitor': {}, '../schedule/scheduler': {},
   '../voicecmd/engine': {}, '../memory': { normalizeMemoryMaxRecords: Number },
+  // 配置页的「测试搜索」走真实搜索链路，本文件的用例只碰播放/恢复逻辑
+  '../voicecmd/online_searcher': { OnlineSearcher: class { } },
   '../utils/http': {}, '../utils/debug': {}, '../mina/constants': { DEFAULT_MUSIC_API_MODELS: [] },
 });
 

@@ -34,11 +34,16 @@ npm run validate
 
 Node 22 的类型擦除参数用于直接导入 TS 的测试。构建会先生成词典/节假日数据，再构建前端、打包并编译 QuickJS 字节码；`static/index.html`、`dist/` 为忽略的构建产物，`static/` 中其余文件入库。前端变更另在 `frontend/` 执行 `npm run typecheck && npm run build && npm test`。涉及宿主播放接口、Range 或定时器时，在父仓库执行相应 Go 回归测试和 `make check`。
 
+`tests/chat_loader.mjs` 需要 plugin-sdk 的源码来拿 `createRouter` 等导出。它优先用 `../toolchain/packages/plugin-sdk/src/index.ts`（改 SDK 时能即时验证），该路径不存在时**透明回退**到已安装的 `node_modules/@songloft/plugin-sdk`（cjs 入口），测试文件里那些硬编码 toolchain 路径的 `load` 调用也走同一重定向。因此本机不 clone toolchain 也能跑全量测试。
+
+`tests/player_failures.test.mjs` 自带一套 `loadSource`（transpile + 依赖表替换），**依赖表要跟着新增的 import 手工补**：它之后加载的模块（如 `handlers/config.ts`）若新增了 `import`，必须同步给替身，否则会在文件加载阶段抛 `unexpected dependency: <模块> (required from <文件>)`。那个报错发生在 import 期，node 又把它报成「test ended 之后的异步活动」，很难定位，所以错误信息里特意带上了宿主模块路径。
+
 ## 公共宿主 API 使用经验
 
 - 宿主 `internal/jsplugin/assets/common.js` 末尾公开对象决定 `window.SongloftPlugin` 实际可用的成员；使用 `@songloft/client-sdk` 的 `SongloftPluginGlobal`，不要手写宿主 API 类型。
 - `invokeHost` 一度只存在于 `window.__SongloftInternal`（标注"插件请勿依赖"）而公开对象里没有，miot 却在自己的 `frontend/env.d.ts` 里手写了 `invokeHost?` 声明，于是 `window.SongloftPlugin?.invokeHost?.(...)` 通过 TS 编译、运行时被可选调用**静默吞掉**，收藏同步整个功能一个字节都没发出去（songloft-org/songloft-plugin-miot#86 第二次复发的根因）。
 - 收藏同步通过公开 `invokeHost('favorite', 'refresh', {songId, isFavorited})` 调用宿主；原生 WebView 与 Web/iframe 的传输差异交给 SDK/宿主处理。
+- **别把「拉全量再自己筛」当默认做法**。宿主已经有带过滤/轻量的接口时直接用：判断「本地是否有这首歌」用 `?keyword=`（同时 LIKE 标题/歌手/专辑/标签/参与歌手，先筛到几十条）而不是把十万首拉进 QuickJS 内存里 find；判断「是否已收藏」用 `GET /playlists/{id}/song-ids`（只回 id 数组）而不是 `getSongs` 拉整个收藏歌单。新增宿主接口一律要探活 + 降级，老宿主会 404。`exclude_playlist_labels=none` 与显式 `type` 过滤同理——只拿能用得上的，口径还要和索引用 SDK 桥接的那条路对齐。
 
 ## 服务端播放接口的插件侧约定
 

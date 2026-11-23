@@ -6,8 +6,15 @@ const require = createRequire(import.meta.url);
 const ts = require('typescript');
 export function loader(overrides = {}) {
   const cache = new Map();
+  const SDK_SOURCE_SUFFIX = '/toolchain/packages/plugin-sdk/src/index.ts';
   function load(file) {
     const path = resolve(dirname(fileURLToPath(import.meta.url)), file);
+    // 多个测试会显式 load('../../../toolchain/packages/plugin-sdk/src/index.ts') 拿 createRouter。
+    // 本机没 clone toolchain 时，把这个硬编码路径透明重定向到已安装的 npm 包
+    // （node_modules/@songloft/plugin-sdk，cjs 入口），不用改每个测试文件。
+    if (path.replace(/\\/g, '/').endsWith(SDK_SOURCE_SUFFIX) && !existsSync(path)) {
+      return require('@songloft/plugin-sdk');
+    }
     if (cache.has(path))
       return cache.get(path);
     const exports = {};
@@ -17,8 +24,15 @@ export function loader(overrides = {}) {
     new Function('require', 'exports', outputText)(name => {
       if (Object.hasOwn(overrides, name))
         return overrides[name];
-      if (name === '@songloft/plugin-sdk')
-        return load('../../../toolchain/packages/plugin-sdk/src/index.ts');
+      if (name === '@songloft/plugin-sdk') {
+        // 优先用 toolchain 源码（改 SDK 时可即时验证）；本机没 clone toolchain 时
+        // 回退到已安装的 npm 包（node_modules/@songloft/plugin-sdk，cjs 入口）。
+        const sdkSource = resolve(
+          dirname(fileURLToPath(import.meta.url)),
+          '../../../toolchain/packages/plugin-sdk/src/index.ts',
+        );
+        return existsSync(sdkSource) ? load(sdkSource) : require('@songloft/plugin-sdk');
+      }
       if (!name.startsWith('.'))
         return require(name);
       const base = resolve(dirname(path), name);

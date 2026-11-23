@@ -34,11 +34,16 @@ npm run validate
 
 The Node 22 type-stripping flag is required for tests that import TS directly. Building first generates dictionaries/holiday data, then builds the frontend, packages assets, and compiles QuickJS bytecode. `static/index.html` and `dist/` are ignored build outputs. For frontend changes, also run `npm run typecheck && npm run build && npm test` in `frontend/`. Changes involving host playback APIs, Range, or timers require the related Go regressions and `make check` in the parent.
 
+`tests/chat_loader.mjs` needs plugin-sdk sources for exports like `createRouter`. It prefers `../toolchain/packages/plugin-sdk/src/index.ts` (so SDK edits are verified immediately) and **transparently falls back** to the installed `node_modules/@songloft/plugin-sdk` cjs entry when that path is absent; hardcoded toolchain paths inside test files go through the same redirect. The full suite therefore runs without a local toolchain clone.
+
+`tests/player_failures.test.mjs` ships its own `loadSource` (transpile + dependency-table substitution), so **its dependency table must be updated by hand whenever an imported module gains an import**. A missing stub throws `unexpected dependency: <module> (required from <file>)` during module evaluation, which Node reports as "asynchronous activity after the test ended" — that is why the message now carries the requiring module's path.
+
 ## Lessons from public host APIs
 
 - The public object at the end of the host's `internal/jsplugin/assets/common.js` determines the available `window.SongloftPlugin` members. Use `SongloftPluginGlobal` from `@songloft/client-sdk` instead of handwritten host API types.
 - `invokeHost` once existed only on `window.__SongloftInternal` (marked "plugins must not depend on this") and was absent from the public object, yet miot hand-wrote an `invokeHost?` declaration in its own `frontend/env.d.ts`. So `window.SongloftPlugin?.invokeHost?.(...)` type-checked fine and was **silently swallowed** by the optional call at runtime — the entire favorite-sync feature never sent a single byte (the root cause of the second regression in songloft-org/songloft-plugin-miot#86).
 - Favorite synchronization uses the public `invokeHost('favorite', 'refresh', {songId, isFavorited})`; leave transport differences between native WebView and Web/iframe to the SDK/host.
+- **"Pull everything and filter in JS" must not be the default.** When the host already exposes a filtered or lightweight endpoint, use it: to test whether a song exists locally use `?keyword=` (it LIKEs title/artist/album/tags/credited artists, narrowing to dozens of rows) instead of dragging 100k songs into the QuickJS heap for a `find`; to test "is this song favorited" use `GET /playlists/{id}/song-ids` (an id array) instead of `getSongs` on the whole favorites playlist. Any newly used host endpoint needs a liveness probe plus a fallback — older hosts return 404. `exclude_playlist_labels=none` and explicit `type` filters follow the same principle (only take what is usable), and the filter scope must match the path that goes through the SDK bridge during indexing.
 
 ## Plugin conventions for server playback APIs
 
