@@ -115,6 +115,32 @@ test('lxserver 直链全部失败时回退 topone', async t => {
   assertToponeRef(result, 'primary', '晴天');
 });
 
+test('内置 lxserver：只并发解析前 3 个候选，首个成功即返回', async t => {
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const { searcher, requests } = fixture(t, {
+    handler: (url) => {
+      if (url.includes('/api/music/search')) {
+        return jsonResp(Array.from({ length: 8 }, (_, i) => lxSong({ songmid: String(i + 1) })));
+      }
+      if (url.includes('/api/music/url')) {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        return new Promise(resolve => setTimeout(() => {
+          inFlight -= 1;
+          resolve(jsonResp({ url: 'https://audio.test/q.mp3', type: '320k' }));
+        }, 30));
+      }
+      return jsonResp([]);
+    },
+  });
+  const result = await searcher.search('晴天', { title: '晴天' });
+  assert.ok(result);
+  const urlCalls = requests.filter(r => r.url.includes('/api/music/url')).length;
+  assert.equal(urlCalls, 3, '最多解析前 3 个候选，不再串行吃满 8 首');
+  assert.ok(maxInFlight >= 2, '候选解析应并发发起');
+});
+
 test('lxserver 禁用时完全不发请求，仅走 topone', async t => {
   const toponeSong = { title: '稻香', artist: '周杰伦', url: 'https://topone.test/song.mp3' };
   const { searcher, requests } = fixture(t, {
@@ -284,6 +310,19 @@ test('searchArtistQueue：歌手名精确匹配优先于包含匹配/高热度�
   const artistCall = requests.find(r => r.url.includes('/api/music/artistSongs'));
   assert.ok(artistCall, '应调用 artistSongs');
   assert.match(artistCall.url, /id=7763/, '选精确同名歌手');
+});
+
+test('searchArtistQueue：源侧查询用原文，带标点的别名也能搜到', async t => {
+  const { searcher, requests } = artistFixture(t, { artists: [lxArtist()], count: 2 });
+  const queue = await searcher.searchArtistQueue('G.E.M.邓紫棋');
+  assert.ok(queue, '带标点的别名应能命中');
+  const searchCall = requests.find(r => r.url.includes('/api/music/search'));
+  assert.ok(searchCall);
+  assert.equal(
+    new URL(searchCall.url).searchParams.get('name'),
+    'G.E.M.邓紫棋',
+    '查询词不能被归一化成去标点小写值',
+  );
 });
 
 test('searchArtistQueue：源不支持歌手能力时返回 null 且不请求 artistSongs', async t => {

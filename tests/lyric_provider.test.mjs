@@ -22,6 +22,7 @@ test('归一化：各源的别名映射到宿主 LyricPayload 字段', () => {
 
 test('归一化：拆一层 {data} 信封，非歌词形态返回全空', () => {
   assert.equal(normalizeLyric({ code: 0, data: { lyric: '[00:02]嵌套' } }).lyric, '[00:02]嵌套');
+  assert.equal(normalizeLyric({ code: 0, data: '  [00:03]字符串信封  ' }).lyric, '[00:03]字符串信封', 'data 为整段 LRC 字符串时也要取到主歌词');
   assert.deepEqual(normalizeLyric(null), { lyric: '', tlyric: '', rlyric: '', lxlyric: '' });
   assert.deepEqual(normalizeLyric(42), { lyric: '', tlyric: '', rlyric: '', lxlyric: '' });
   assert.equal(isLyricEmpty(normalizeLyric({ lyric: '', tlyric: '  ' })), true);

@@ -160,6 +160,30 @@ test('resolveSongRef：raw 失效时按 platform+id 重搜兜底', async t => {
   assert.equal(urlAttempts, 2);
 });
 
+test('resolveSongRef：name 缺失时用 singer 重搜（旧写法会拼出空关键词）', async t => {
+  withSongloft(t);
+  let searchedName = null;
+  t.mock.method(globalThis, 'fetch', async (url) => {
+    if (url.includes('/api/music/search')) {
+      searchedName = new URL(url).searchParams.get('name');
+      return jsonResp([{
+        name: '晴天', singer: '周杰伦', source: 'kw', songmid: '228908', interval: '04:29',
+      }]);
+    }
+    if (url.includes('/api/music/url')) {
+      return jsonResp({ url: 'https://audio.test/by-singer.mp3', type: '320k' });
+    }
+    return jsonResp([]);
+  });
+
+  const provider = new LxServerProvider(lxConfig());
+  const playable = await provider.resolveSongRef({
+    v: 1, owner: PLUGIN_ENTRY_PATH, platform: 'kw', id: '228908', singer: '周杰伦',
+  });
+  assert.equal(playable.url, 'https://audio.test/by-singer.mp3');
+  assert.equal(searchedName, '周杰伦', 'name 为空时必须用 singer 当重搜词');
+});
+
 test('resolveSongRef：全链路失败时抛错（宿主据此返 502 并切源）', async t => {
   withSongloft(t);
   t.mock.method(globalThis, 'fetch', async (url) => {

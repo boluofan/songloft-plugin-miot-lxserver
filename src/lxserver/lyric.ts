@@ -51,6 +51,11 @@ export function normalizeLyric(raw: unknown): LyricPayload {
   // 避免把 data 当成歌词文本误存。
   if (!FIELD_ALIASES.some(([, aliases]) => aliases.some((key) => asText(source[key])))) {
     const data = source.data;
+    if (typeof data === 'string') {
+      // 少数源把整段 LRC 直接塞进 data 字符串；拆包后就是主歌词。
+      out.lyric = asText(data);
+      return out;
+    }
     if (data && typeof data === 'object' && !Array.isArray(data)) {
       source = data as Record<string, unknown>;
     }

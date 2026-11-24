@@ -38,6 +38,13 @@ function includesLoose(actual: string, expected: string): boolean {
 /** lxserver 能力矩阵：只有 tx/wy 支持 type=singer 与 artistSongs（kw/kg/mg 会返回 500） */
 const ARTIST_SOURCES = new Set(['tx', 'wy']);
 
+/** 搜索总预算：QuickJS 单线程，慢源不能把播放/状态推送堵在后面 */
+const SEARCH_BUDGET_MS = 20_000;
+/** 并发解析的候选数：同一首歌的跨源轮询由服务端负责，这里只并发选「哪首歌」 */
+const PARALLEL_CANDIDATES = 3;
+/** 单个候选的解析子预算，避免某首歌的音质阶梯吃满整段搜索预算 */
+const PER_CANDIDATE_MS = 6_000;
+
 /** 歌手名匹配分：精确名 > 包含名；同档再用专辑数体现流行度（避免选到同名小号） */
 function artistMatchScore(artist: LXArtist, target: string): number {
   const names = [artist.name, ...artist.aliases].map(normalizeText).filter(Boolean);
@@ -119,50 +126,58 @@ export class LxServerProvider {
     await this.client.ensureAuthReady().catch(() => undefined);
   }
 
-  /** 搜索并返回最佳候选：多源并发 → hint 打分排序 → 逐个解析直链 → 首个可播即返回 */
+  /** 搜索并返回最佳候选：多源聚合 → hint 打分排序 → 并发解析前几个 → 首个可播即返回 */
   async search(keyword: string, hint: LXSearchHint | null): Promise<OnlineSearchResult | null> {
     this.lastMissReason = null;
     if (!this.isConfigured()) return null;
     const clean = keyword.replace(/\s+/g, ' ').trim();
     if (!clean) return null;
 
-    let tracks: LXTrack[];
+    const deadlineAt = Date.now() + SEARCH_BUDGET_MS;
     try {
-      // voice 点歌若在 search_priority=external_first 时 keyword 可能是 "歌手 歌名" 组合，
-      // 先按原词搜；无结果再用 hint.title 兜底（对齐 lxbridge 的 searchWithFallback 思路）。
-      tracks = await this.client.searchAggregate(clean);
-      if (tracks.length === 0 && hint?.title && normalizeText(hint.title) !== normalizeText(clean)) {
-        tracks = await this.client.searchAggregate(hint.title);
-      }
-    } catch (e) {
-      this.lastMissReason = 'error';
-      songloft.log.warn('[LxServerProvider] search failed: ' + String(e));
-      return null;
-    }
-    if (tracks.length === 0) {
-      this.lastMissReason = 'no_candidates';
-      songloft.log.info('[LxServerProvider] no candidates for: ' + clean);
-      return null;
-    }
+      return await this.withBudget(deadlineAt - Date.now(), async () => {
+        let tracks: LXTrack[];
+        try {
+          // voice 点歌若在 search_priority=external_first 时 keyword 可能是 "歌手 歌名" 组合，
+          // 先按原词搜；无结果再用 hint.title 兜底（对齐 lxbridge 的 searchWithFallback 思路）。
+          tracks = await this.client.searchAggregate(clean);
+          if (tracks.length === 0 && hint?.title && normalizeText(hint.title) !== normalizeText(clean)) {
+            tracks = await this.client.searchAggregate(hint.title);
+          }
+        } catch (e) {
+          this.lastMissReason = 'error';
+          songloft.log.warn('[LxServerProvider] search failed: ' + String(e));
+          return null;
+        }
+        if (tracks.length === 0) {
+          this.lastMissReason = 'no_candidates';
+          songloft.log.info('[LxServerProvider] no candidates for: ' + clean);
+          return null;
+        }
 
-    // 打分排序；同分保持 lxserver 返回顺序（sources 优先级）
-    const ranked = tracks
-      .map((t) => ({ track: t, score: matchScore(t, hint) }))
-      .sort((a, b) => b.score - a.score);
+        // 打分排序；同分保持 lxserver 返回顺序（sources 优先级）
+        const ranked = tracks
+          .map((t) => ({ track: t, score: matchScore(t, hint) }))
+          .sort((a, b) => b.score - a.score);
 
-    // 有 hint 时过滤掉明显不相关的候选（分数过低）
-    const threshold = hint ? 40 : 0;
-    const candidates = ranked.filter((r) => r.score >= threshold).slice(0, 8);
-    if (candidates.length === 0) {
-      this.lastMissReason = 'below_threshold';
-      songloft.log.info('[LxServerProvider] all candidates below threshold for: ' + clean);
-      return null;
-    }
+        // 有 hint 时过滤掉明显不相关的候选（分数过低）
+        const threshold = hint ? 40 : 0;
+        const candidates = ranked.filter((r) => r.score >= threshold).slice(0, 8);
+        if (candidates.length === 0) {
+          this.lastMissReason = 'below_threshold';
+          songloft.log.info('[LxServerProvider] all candidates below threshold for: ' + clean);
+          return null;
+        }
 
-    // 逐个解析直链：任一成功即返回；失败继续下一个（音源降级在 client.resolveUrlLadder 内）
-    for (const { track } of candidates) {
-      try {
-        const playable = await this.client.resolveUrlLadder(track.raw);
+        // 并发解析前 N 个候选：首个拿到直链即返回，其余结果丢弃。
+        // 同一首歌的跨源轮询/重试由服务端 /api/music/url 内部完成，这里不重复做。
+        const first = await this.firstPlayable(candidates, deadlineAt);
+        if (!first) {
+          this.lastMissReason = 'no_playable_url';
+          songloft.log.warn('[LxServerProvider] no playable url for: ' + clean);
+          return null;
+        }
+        const { track, playable } = first;
         songloft.log.info(
           `[LxServerProvider] hit ${track.source}/${track.name}-${track.singer} quality=${playable.type}`,
         );
@@ -178,15 +193,56 @@ export class LxServerProvider {
           // 播放时由宿主回调本插件的 /api/music/url 现解析。
           source_data: buildSongRef(track, playable.type),
         };
+      }, '搜索');
+    } catch (e) {
+      if (this.lastMissReason === null) this.lastMissReason = 'error';
+      songloft.log.warn('[LxServerProvider] search budget exceeded: ' + String(e));
+      return null;
+    }
+  }
+
+  /** 并发解析候选：谁先拿到可播直链就用谁，失败/超时的不阻塞其它候选 */
+  private async firstPlayable(
+    candidates: Array<{ track: LXTrack; score: number }>,
+    deadlineAt: number,
+  ): Promise<{ track: LXTrack; playable: LXPlayableUrl } | null> {
+    const now = Date.now();
+    const deadline = Math.min(deadlineAt, now + PER_CANDIDATE_MS);
+    const tasks = candidates.slice(0, PARALLEL_CANDIDATES).map(async ({ track }) => {
+      try {
+        const playable = await this.withBudget(
+          Math.max(1000, deadline - Date.now()),
+          () => this.client.resolveUrlLadder(track.raw, deadline),
+          '候选解析',
+        );
+        return { track, playable };
       } catch (e) {
         songloft.log.warn(
           `[LxServerProvider] url resolve failed for ${track.source}/${track.name}: ${String(e)}`,
         );
+        return null;
       }
-    }
-    this.lastMissReason = 'no_playable_url';
-    songloft.log.warn('[LxServerProvider] no playable url for: ' + clean);
-    return null;
+    });
+
+    return new Promise((resolve) => {
+      let pending = tasks.length;
+      let settled = false;
+      for (const task of tasks) {
+        task.then(
+          (result) => {
+            if (result && !settled) {
+              settled = true;
+              resolve(result);
+              return;
+            }
+            if (--pending === 0 && !settled) resolve(null);
+          },
+          () => {
+            if (--pending === 0 && !settled) resolve(null);
+          },
+        );
+      }
+    });
   }
 
   /**
@@ -235,7 +291,9 @@ export class LxServerProvider {
   async artistQueue(name: string, limit = 10, preResolve = 2): Promise<LXArtistQueue | null> {
     this.lastMissReason = null;
     if (!this.isConfigured()) return null;
-    const target = normalizeText(name);
+    // 源侧查询用原文（带标点/大小写的别名只有原文能搜到）；归一化值只用于本地打分。
+    const query = name.replace(/\s+/g, ' ').trim();
+    const target = normalizeText(query);
     if (!target) return null;
 
     // 只在支持歌手能力的源里找，保持用户配置的 sources 顺序（先配的源优先）。
@@ -252,7 +310,7 @@ export class LxServerProvider {
       let songs: LXTrack[] = [];
       let pick: { artist: LXArtist; score: number } | null = null;
       try {
-        const artists = await this.client.searchSingers(source, target, 10);
+        const artists = await this.client.searchSingers(source, query, 10);
         const ranked = artists
           .map((artist) => ({ artist, score: artistMatchScore(artist, target) }))
           .filter((r) => r.score > 0)
@@ -332,13 +390,13 @@ export class LxServerProvider {
    * 带总时长预算的执行：QuickJS 是单线程调度器，一次解析卡太久会把插件的其它调用（含播放）
    * 全部堵在后面。宿主给 /music/url 的调度预算是 30s，这里留 5s 余量，超时就让宿主走 502 切源。
    */
-  private async withBudget<T>(ms: number, run: () => Promise<T>): Promise<T> {
+  private async withBudget<T>(ms: number, run: () => Promise<T>, label = '解析'): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
         run(),
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`解析超时(>${Math.round(ms / 1000)}s)`)), ms);
+          timer = setTimeout(() => reject(new Error(`${label}超时(>${Math.round(ms / 1000)}s)`)), ms);
         }),
       ]);
     } finally {
@@ -371,7 +429,8 @@ export class LxServerProvider {
       }
     }
 
-    const keyword = (ref.name || '').trim() || [ref.singer, ref.name].filter(Boolean).join(' ').trim();
+    // singer+name 一起传，源侧更容易命中同歌手同名版本；命中后仍按 (platform,id) 精确挑。
+    const keyword = [ref.singer, ref.name].filter(Boolean).join(' ').trim();
     if (keyword) {
       try {
         const tracks = ref.platform

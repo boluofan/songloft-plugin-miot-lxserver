@@ -346,26 +346,44 @@ export class LxServerClient {
   }
 
   /** 播放直链：songInfo 必须是 search 原样返回的完整对象（缺 hash/songmid/songId 会全源解析失败） */
-  async musicUrl(songInfo: Record<string, unknown>, quality: LXQuality): Promise<LXPlayableUrl> {
+  async musicUrl(
+    songInfo: Record<string, unknown>,
+    quality: LXQuality,
+    timeoutMs = this.cfg.urlTimeout * 1000,
+  ): Promise<LXPlayableUrl> {
     const body = JSON.stringify({ songInfo, quality });
     const r = await this.reqJSON<{ url?: string; type?: string; sourceName?: string; error?: string }>(
       '/api/music/url',
       { method: 'POST', body },
-      this.cfg.urlTimeout * 1000,
+      timeoutMs,
     );
     if (!r || !r.url) throw new LxError(this.withAuthHint(r?.error || '解析失败:无 url'));
     return { url: r.url, type: String(r.type ?? quality), sourceName: r.sourceName };
   }
 
-  /** 音质阶梯降级：flac → 320k → 128k */
-  async resolveUrlLadder(songInfo: Record<string, unknown>): Promise<LXPlayableUrl> {
+  /**
+   * 音质阶梯降级：flac → 320k → 128k。
+   * 服务端自己会做「同一首歌跨源轮询」，这里只补服务端没做的音质档位降级；
+   * deadlineAt 由上层搜索/解析预算传入，避免阶梯各档各自吃满完整超时。
+   */
+  async resolveUrlLadder(
+    songInfo: Record<string, unknown>,
+    deadlineAt?: number,
+  ): Promise<LXPlayableUrl> {
     const ladder = this.cfg.allowQualityFallback
       ? QUALITY_LADDER[this.cfg.quality]
       : [this.cfg.quality];
+    const fullTimeout = this.cfg.urlTimeout * 1000;
     let lastErr: unknown;
     for (const q of ladder) {
+      if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
+        throw new LxError('解析预算已耗尽');
+      }
+      const timeoutMs = deadlineAt === undefined
+        ? fullTimeout
+        : Math.max(1000, Math.min(fullTimeout, deadlineAt - Date.now()));
       try {
-        return await this.musicUrl(songInfo, q);
+        return await this.musicUrl(songInfo, q, timeoutMs);
       } catch (e) {
         lastErr = e;
       }
