@@ -16,7 +16,7 @@ import type { LXMissReason } from '../lxserver/provider';
 import type { LXArtistQueue } from '../lxserver/provider';
 import { PLUGIN_ENTRY_PATH, buildSongRef, buildToponeRef, isOwnSongRef, toponeDedupKey } from '../lxserver/ref';
 import type { ToponeSongRef } from '../lxserver/ref';
-import { normalizeLXServerConfig } from '../lxserver/types';
+import { createProviderCache } from '../lxserver/provider_cache';
 
 // 外部搜索 API 请求体
 interface SearchOneRequest {
@@ -140,8 +140,7 @@ export class OnlineSearcher {
   private configManager: ConfigManager;
   private groupCoordinator?: GroupCoordinator;
   /** 内置 lxserver provider 缓存：按配置签名重建，保留鉴权缓存（authUser/authPending） */
-  private lxProvider?: LxServerProvider;
-  private lxProviderSig = '';
+  private lxProviderCache = createProviderCache();
 
   constructor(configManager: ConfigManager, groupCoordinator?: GroupCoordinator) {
     this.configManager = configManager;
@@ -153,15 +152,8 @@ export class OnlineSearcher {
    * 注意：一个 token 一个实例，authUser/authPending 是实例私有状态，配置未变时必须复用。
    */
   private async getLxProvider(): Promise<LxServerProvider | null> {
-    const config = await this.configManager.getConfig();
-    const lx = normalizeLXServerConfig(config.lxserver);
-    if (!lx.enabled || !lx.host.trim()) return null;
-    const sig = [lx.host, lx.token, lx.quality, lx.allowQualityFallback, lx.sources.join(','), lx.searchTimeout, lx.urlTimeout].join('|');
-    if (!this.lxProvider || this.lxProviderSig !== sig) {
-      this.lxProvider = new LxServerProvider(lx);
-      this.lxProviderSig = sig;
-    }
-    return this.lxProvider;
+    const cached = await this.lxProviderCache.get(this.configManager);
+    return cached?.provider ?? null;
   }
 
   /**

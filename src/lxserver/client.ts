@@ -189,17 +189,25 @@ export class LxServerClient {
     return h;
   }
 
-  /** 全局并发闸 */
+  /**
+   * 全局并发闸：令牌交接。
+   * 旧写法先 globalActive-- 再唤醒 waiter，waiter 醒来后才 ++；微任务间隙里新请求
+   * 看到计数回落就抢先 ++，实际并发会超过 MAX_CONCURRENT。这里改成把令牌直接交给
+   * waiter（计数不减），只有在没人等时才归还。
+   */
   private async slot<T>(fn: () => Promise<T>): Promise<T> {
     if (globalActive >= MAX_CONCURRENT) {
       await new Promise<void>((resolve) => globalWaiters.push(resolve));
+      // 醒来时令牌已由前一个请求交接，globalActive 已包含本请求
+    } else {
+      globalActive++;
     }
-    globalActive++;
     try {
       return await fn();
     } finally {
-      globalActive--;
-      globalWaiters.shift()?.();
+      const next = globalWaiters.shift();
+      if (next) next();
+      else globalActive--;
     }
   }
 
@@ -248,13 +256,13 @@ export class LxServerClient {
     return r.token;
   }
 
-  /** 单源搜索：GET /api/music/search。limit 显式传入走单页，符合最新 lxserver 语义 */
-  async searchSongs(source: string, name: string, limit = 20): Promise<LXTrack[]> {
+  /** 单源搜索：GET /api/music/search。limit 显式传入走单页，timeoutMs 供上层共享预算 */
+  async searchSongs(source: string, name: string, limit = 20, timeoutMs?: number): Promise<LXTrack[]> {
     const q = new URLSearchParams({ name, source, type: 'song', page: '1', limit: String(limit) });
     const r = await this.reqJSON<unknown>(
       `/api/music/search?${q.toString()}`,
       { method: 'GET' },
-      this.cfg.searchTimeout * 1000,
+      timeoutMs ?? this.cfg.searchTimeout * 1000,
     );
     const list = unwrapSearchList<Record<string, unknown>>(r, 'search/song');
     return list.map((item) => this.toTrack(item));
@@ -327,9 +335,9 @@ export class LxServerClient {
   }
 
   /** 多源并发聚合（allSettled 失败隔离），返回按 sources 顺序的曲目，去重按 source+id */
-  async searchAggregate(name: string, sources?: string[]): Promise<LXTrack[]> {
+  async searchAggregate(name: string, sources?: string[], timeoutMs?: number): Promise<LXTrack[]> {
     const list = sources && sources.length > 0 ? sources : this.cfg.sources;
-    const settled = await Promise.allSettled(list.map((s) => this.searchSongs(s, name)));
+    const settled = await Promise.allSettled(list.map((s) => this.searchSongs(s, name, 20, timeoutMs)));
     const out: LXTrack[] = [];
     const seen = new Set<string>();
     settled.forEach((r) => {

@@ -149,11 +149,7 @@ export function registerConfigHandlers(
           ai_config: aiConfig,
           default_cover_id: config.default_cover_id,
           touchscreen_lyrics_enabled: !!config.touchscreen_lyrics_enabled,
-          lxserver: config.lxserver || {
-            enabled: false, host: '', token: '', quality: '320k',
-            allowQualityFallback: true, sources: ['kw', 'kg', 'tx', 'wy', 'mg'],
-            searchTimeout: 6, urlTimeout: 12,
-          },
+          lxserver: normalizeLXServerConfig(config.lxserver),
         },
       });
     } catch (e: any) {

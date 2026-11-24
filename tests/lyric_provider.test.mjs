@@ -3,6 +3,7 @@ import test from 'node:test';
 import { loader } from './chat_loader.mjs';
 
 const { normalizeLyric, isLyricEmpty } = loader()('../src/lxserver/lyric.ts');
+const { lxConfigSignature } = loader({ '../types': {} })('../src/lxserver/provider_cache.ts');
 
 test('归一化：lxserver 无翻译时直接返回纯 LRC 字符串', () => {
   assert.equal(normalizeLyric('[00:01]晴天').lyric, '[00:01]晴天');
@@ -41,7 +42,7 @@ const songInfo = (id = '228908') => ({
 });
 
 function setup(t, options = {}) {
-  const { lyricResponse = { lyric: '[00:01]晴天' }, songs = [songInfo()] } = options;
+  const { lyricResponse = { lyric: '[00:01]晴天' }, songs = [songInfo()], token = '' } = options;
   const previous = { fetch: globalThis.fetch, songloft: globalThis.songloft };
   const requests = [];
   let lyricCalls = 0;
@@ -66,7 +67,7 @@ function setup(t, options = {}) {
   const configManager = {
     getConfig: async () => ({
       lxserver: {
-        enabled: true, host: 'http://lx.test:9527', token: '', quality: '320k',
+        enabled: true, host: 'http://lx.test:9527', token, quality: '320k',
         allowQualityFallback: true, sources: ['kw'], searchTimeout: 2, urlTimeout: 2,
       },
     }),
@@ -127,4 +128,22 @@ test('/lyric-search 未配置内置源时不发任何请求', async t => {
   assert.equal(result.statusCode, 404);
   assert.deepEqual(JSON.parse(result.body), {});
   assert.equal(h.requests.length, 0);
+});
+
+test('provider 缓存签名覆盖 searchTimeout，配置变化会重建实例', () => {
+  const base = {
+    enabled: true, host: 'http://lx.test:9527', token: '', quality: '320k',
+    allowQualityFallback: true, sources: ['kw'], searchTimeout: 6,
+    urlTimeout: 12, artist_queue_enabled: false,
+  };
+  assert.notEqual(lxConfigSignature(base), lxConfigSignature({ ...base, searchTimeout: 7 }));
+  assert.notEqual(lxConfigSignature(base), lxConfigSignature({ ...base, token: 'tk' }));
+});
+
+test('/lyric-search：同一配置多次请求复用 provider，token 校验只做一次', async t => {
+  const h = setup(t, { token: 'tk' });
+  await h.search('title=晴天&artist=周杰伦');
+  await h.search('title=晴天&artist=周杰伦');
+  const verifies = h.requests.filter(r => r.url.includes('/api/user/auth/verify'));
+  assert.equal(verifies.length, 1, 'provider 复用后不应每次回调都重新校验 token');
 });

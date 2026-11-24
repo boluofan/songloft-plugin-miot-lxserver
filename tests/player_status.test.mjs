@@ -58,6 +58,11 @@ for (const stored of [{}, { conversation_poll_interval: 1 }, { conversation_poll
       '../chat/types': loadSource('../src/chat/types.ts', { '../utils/ai_headers': loadSource('../src/utils/ai_headers.ts', {}) }),
       '../memory/types': loadSource('../src/memory/types.ts', {}),
       '../voicecmd/defaults': loadSource('../src/voicecmd/defaults.ts', {}),
+      // manager 已复用 lxserver/types 的归一化；本用例只关心轮询间隔，给最小替身
+      '../lxserver/types': {
+        defaultLXServerConfig: () => ({}),
+        normalizeLXServerConfig: raw => raw || {},
+      },
     });
     globalThis.songloft = { storage: { get: async () => JSON.stringify(stored) } };
     try {

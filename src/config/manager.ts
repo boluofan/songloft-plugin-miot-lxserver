@@ -27,6 +27,7 @@ import type { ChatConfig } from '../chat/types';
 
 import { DEFAULT_MEMORY_MAX_RECORDS, normalizeMemoryMaxRecords } from '../memory/types';
 import { getDefaultVoiceCommands } from '../voicecmd/defaults';
+import { defaultLXServerConfig, normalizeLXServerConfig } from '../lxserver/types';
 
 // ===== 存储键常量 =====
 const STORAGE_KEY_CONFIG = 'config';
@@ -109,51 +110,11 @@ function defaultPluginConfig(): PluginConfig {
     hourly_chime_resume_enabled: false,
     max_song_index: 10000,
     ai_config: defaultAIConfig(),
-    lxserver: defaultLXServerSettings(),
+    lxserver: defaultLXServerConfig(),
   };
 }
 
-/** 归一化内置 lxserver 配置：与默认值字段级合并 */
-function normalizeLXServerSettings(
-  stored: Partial<import('../types').LXServerSettings> | undefined,
-  fallback: import('../types').LXServerSettings,
-): import('../types').LXServerSettings {
-  if (!stored || typeof stored !== 'object') return fallback;
-  const validSources = new Set(['kw', 'kg', 'tx', 'wy', 'mg']);
-  const sources = Array.isArray(stored.sources)
-    ? stored.sources.filter((s) => validSources.has(s))
-    : fallback.sources;
-  const clamp = (v: unknown, f: number, min: number, max: number): number => {
-    const n = typeof v === 'number' ? v : Number(v);
-    return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.floor(n))) : f;
-  };
-  return {
-    enabled: stored.enabled === true,
-    host: typeof stored.host === 'string' ? stored.host.trim().replace(/\/+$/, '') : '',
-    token: typeof stored.token === 'string' ? stored.token.trim() : '',
-    quality: stored.quality === 'flac' || stored.quality === '128k' ? stored.quality : fallback.quality,
-    allowQualityFallback: stored.allowQualityFallback !== false,
-    sources: sources.length > 0 ? sources : fallback.sources,
-    searchTimeout: clamp(stored.searchTimeout, fallback.searchTimeout, 1, 30),
-    urlTimeout: clamp(stored.urlTimeout, fallback.urlTimeout, 3, 60),
-    artist_queue_enabled: stored.artist_queue_enabled === true,
-  };
-}
-
-/** 内置 lxserver 搜索源默认配置 */
-function defaultLXServerSettings(): import('../types').LXServerSettings {
-  return {
-    enabled: false,
-    host: '',
-    token: '',
-    quality: '320k',
-    allowQualityFallback: true,
-    sources: ['kw', 'kg', 'tx', 'wy', 'mg'],
-    searchTimeout: 6,
-    urlTimeout: 12,
-    artist_queue_enabled: false,
-  };
-}
+/** 内置 lxserver 默认值与归一化统一由 lxserver/types 提供，避免两处字段/边界漂移 */
 
 /** 默认 AI 配置 */
 function defaultAIConfig(): AIConfig {
@@ -261,7 +222,7 @@ export class ConfigManager {
     merged.voice_memory_enabled = stored.voice_memory_enabled !== false;
     merged.voice_memory_max_records = normalizeMemoryMaxRecords(stored.voice_memory_max_records);
     // 内置 lxserver 配置：与默认值做字段级合并，避免旧配置里不完整的对象覆盖全部默认值
-    merged.lxserver = normalizeLXServerSettings(stored.lxserver, merged.lxserver);
+    merged.lxserver = normalizeLXServerConfig(stored.lxserver);
     if (migratedDebugLog) {
       await this.save(STORAGE_KEY_CONFIG, stored);
       this.configCache = Promise.resolve(stored);

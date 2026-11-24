@@ -195,3 +195,37 @@ test('探活用匿名轻接口，鉴权失败不误报不可达', async t => {
   assert.equal(st.reachable, true);
   assert.ok(requests.every(r => !r.url.includes('/verify')), '探活不触发 verify');
 });
+
+test('全局并发闸：同一时刻最多 5 个请求', async t => {
+  let active = 0;
+  let maxActive = 0;
+  setupFetch(t, async () => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    active -= 1;
+    return jsonResp([]);
+  });
+  const client = new LxServerClient(config());
+  const tasks = Array.from({ length: 12 }, (_, i) => client.searchSongs('kw', `q${i}`).catch(() => null));
+  await Promise.all(tasks);
+  assert.equal(maxActive, 5, '令牌交接后并发仍不超过 5');
+});
+
+test('resolveUrlLadder：deadline 已过时不发任何请求', async t => {
+  const requests = setupFetch(t, () => jsonResp({ url: 'https://audio.test/x.mp3', type: '320k' }));
+  const client = new LxServerClient(config({ quality: 'flac', allowQualityFallback: true }));
+  await assert.rejects(
+    () => client.resolveUrlLadder(songInfo(), Date.now() - 1),
+    /预算已耗尽/,
+  );
+  assert.equal(requests.length, 0, '预算耗尽后不再占用并发槽');
+});
+
+test('配置归一化：空对象补齐内置源默认值（含歌手队列开关）', () => {
+  const { normalizeLXServerConfig } = load('../src/lxserver/types.ts');
+  const cfg = normalizeLXServerConfig({});
+  assert.equal(cfg.artist_queue_enabled, false);
+  assert.deepEqual(cfg.sources, ['kw', 'kg', 'tx', 'wy', 'mg']);
+  assert.equal(cfg.searchTimeout, 6);
+});

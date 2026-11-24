@@ -16,38 +16,22 @@ import type { ConfigManager } from '../config/manager';
 import { chatBody } from './chat';
 import { LxServerProvider } from '../lxserver/provider';
 import { decodeAnyRef } from '../lxserver/ref';
-import { normalizeLXServerConfig } from '../lxserver/types';
-import type { LXServerConfig } from '../lxserver/types';
+import { createProviderCache } from '../lxserver/provider_cache';
 import { OnlineSearcher } from '../voicecmd/online_searcher';
 
-/** 解析器缓存：按配置签名重建，保住 client 内部的鉴权结果（否则每次播放多一次 verify 请求） */
-interface ResolverCache {
-  sig: string;
-  provider: LxServerProvider;
-}
-
-function configSignature(cfg: LXServerConfig): string {
-  return [cfg.host, cfg.token, cfg.quality, cfg.allowQualityFallback, cfg.sources.join(','), cfg.urlTimeout].join('|');
-}
+/** 按配置签名复用 provider，保住 client 内部的鉴权结果 */
+const providerCache = createProviderCache();
 
 /**
  * 注册音源解析路由
  * 注册后本插件即可作为 songloft 的「解析型音源」（plugin_entry_path = plugin.json 的 entryPath）。
  */
 export function registerMusicSourceHandlers(router: Router, configManager: ConfigManager): void {
-  let cache: ResolverCache | null = null;
-
   /** 取当前配置下的解析器（配置未变则复用，保住鉴权态） */
   const getProvider = async (): Promise<LxServerProvider> => {
-    const cfg = normalizeLXServerConfig((await configManager.getConfig()).lxserver);
-    if (!cfg.enabled || !cfg.host.trim()) {
-      throw new Error('内置 lxserver 未启用或未配置地址');
-    }
-    const sig = configSignature(cfg);
-    if (!cache || cache.sig !== sig) {
-      cache = { sig, provider: new LxServerProvider(cfg) };
-    }
-    return cache.provider;
+    const cached = await providerCache.get(configManager);
+    if (!cached) throw new Error('内置 lxserver 未启用或未配置地址');
+    return cached.provider;
   };
 
   // 外部源解析：复用 OnlineSearcher 的搜索链路（含去空白重试），不另写一套请求格式

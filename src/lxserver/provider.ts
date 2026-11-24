@@ -415,14 +415,17 @@ export class LxServerProvider {
   async resolveSongRef(ref: LXSongRef): Promise<LXPlayableUrl> {
     if (!this.isConfigured()) throw new Error('lxserver 未配置或未启用');
     const budget = Math.min(25_000, Math.max(5_000, this.cfg.urlTimeout * 1000 * 2));
-    return this.withBudget(budget, () => this.resolveSongRefInner(ref));
+    const deadline = Date.now() + budget;
+    return this.withBudget(budget, () => this.resolveSongRefInner(ref, deadline));
   }
 
-  private async resolveSongRefInner(ref: LXSongRef): Promise<LXPlayableUrl> {
+  private async resolveSongRefInner(ref: LXSongRef, deadline: number): Promise<LXPlayableUrl> {
     let lastErr: unknown = null;
+    // 重搜与后续音质阶梯共用同一个 deadline，预算见底时不再发起新请求占并发槽。
+    const searchTimeout = () => Math.max(1000, Math.min(this.cfg.searchTimeout * 1000, deadline - Date.now()));
     if (ref.raw) {
       try {
-        return await this.client.resolveUrlLadder(ref.raw);
+        return await this.client.resolveUrlLadder(ref.raw, deadline);
       } catch (e) {
         lastErr = e;
         songloft.log.warn(`[LxServerProvider] ref raw resolve failed ${ref.platform}/${ref.id}: ${String(e)}`);
@@ -434,13 +437,13 @@ export class LxServerProvider {
     if (keyword) {
       try {
         const tracks = ref.platform
-          ? await this.client.searchSongs(ref.platform, keyword, 10)
-          : await this.client.searchAggregate(keyword);
+          ? await this.client.searchSongs(ref.platform, keyword, 10, searchTimeout())
+          : await this.client.searchAggregate(keyword, undefined, searchTimeout());
         const hit =
           tracks.find((t) => String(t.source) === ref.platform && t.id === ref.id) ||
           tracks.find((t) => t.id === ref.id) ||
           (ref.name ? tracks.find((t) => normalizeText(t.name) === normalizeText(ref.name || '')) : undefined);
-        if (hit) return await this.client.resolveUrlLadder(hit.raw);
+        if (hit) return await this.client.resolveUrlLadder(hit.raw, deadline);
       } catch (e) {
         lastErr = e;
       }

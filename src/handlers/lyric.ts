@@ -16,8 +16,7 @@ import { jsonResponse, parseQuery } from '@songloft/plugin-sdk';
 import type { Router, HTTPRequest } from '@songloft/plugin-sdk';
 import { callHostAPI } from '../utils/http';
 import type { ConfigManager } from '../config/manager';
-import { normalizeLXServerConfig } from '../lxserver/types';
-import { LxServerProvider } from '../lxserver/provider';
+import { createProviderCache } from '../lxserver/provider_cache';
 import { isLyricEmpty } from '../lxserver/lyric';
 
 interface HostLyricPayload {
@@ -26,6 +25,9 @@ interface HostLyricPayload {
   rlyric?: string;
   lxlyric?: string;
 }
+
+/** 与播放/在线搜索共用同一套 provider 缓存，避免带 token 时每次回调都重打 verify */
+const providerCache = createProviderCache();
 
 /**
  * 注册歌词代理路由
@@ -84,11 +86,10 @@ export function registerLyricHandlers(router: Router, configManager?: ConfigMana
 
     const search = async () => {
       if (!configManager || !title) return null;
-      const config = await configManager.getConfig();
-      const cfg = normalizeLXServerConfig(config.lxserver);
-      if (!cfg.enabled || !cfg.host) return null;
+      const cached = await providerCache.get(configManager);
+      if (!cached) return null;
 
-      const provider = new LxServerProvider(cfg);
+      const provider = cached.provider;
       const hint = { title, artist: artist || undefined, duration };
       // "歌手 歌名" 组合先搜；无结果时 provider 内部按 hint.title 兜底重搜。
       const keyword = artist ? `${artist} ${title}` : title;
