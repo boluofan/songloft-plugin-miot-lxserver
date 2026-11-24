@@ -1,4 +1,5 @@
 import { readSetup } from './setup-source.mjs';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import ts from 'typescript';
 import test from 'node:test';
@@ -236,4 +237,29 @@ test('公告等待方式写入合法枚举值', async () => {
   await h.saveConfig({ play_announcement_wait_mode: 'poll' });
   assert.equal(h.state.config.play_announcement_wait_mode, 'poll');
   assert.deepEqual(h.calls.at(-1), ['save', { play_announcement_wait_mode: 'poll' }]);
+});
+
+test('音源排序按钮图标名必须是图标表中真实存在的上下三角', () => {
+  const view = readFileSync(
+    new URL('../src/views/settings/VoiceSettings.tsx', import.meta.url),
+    'utf8',
+  );
+  const icons = readFileSync(
+    new URL('../src/ui/icons.ts', import.meta.url),
+    'utf8',
+  );
+  // 只取排序按钮区（source-move-group 之后的一小段）里引用的 icon 名
+  const moveAt = view.indexOf('source-move-group');
+  assert.ok(moveAt >= 0, '应存在排序按钮区');
+  const moveBlock = view.slice(moveAt, moveAt + 900);
+  const used = [...moveBlock.matchAll(/icon="([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(used, ['expand_less', 'expand_more']);
+  // SlIcon 找不到名字会回退成 info（圆圈 i），所以必须确认表里真有这两个键
+  for (const name of used) {
+    assert.match(
+      icons,
+      new RegExp(`^\\s{2}${name}:`, 'm'),
+      `图标 ${name} 必须在 icons.ts 的 iconPaths 中定义`,
+    );
+  }
 });

@@ -2097,7 +2097,7 @@ export default function VoiceSettings(props: any) {
                       {enabled ? (
                         <NativeView className="source-move-group">
                           <SlButton
-                            icon="arrow_upward"
+                            icon="expand_less"
                             aria-label={`上移 ${source}`}
                             disabled={activeIndex <= 0}
                             onClick={() => {
@@ -2105,7 +2105,7 @@ export default function VoiceSettings(props: any) {
                             }}
                           ></SlButton>
                           <SlButton
-                            icon="arrow_downward"
+                            icon="expand_more"
                             aria-label={`下移 ${source}`}
                             disabled={activeIndex >= enabledCount - 1}
                             onClick={() => {
