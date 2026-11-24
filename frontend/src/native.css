@@ -898,6 +898,21 @@ text {
   color: var(--md-on-primary);
   font-size: 14px;
 }
+.source-check-grid {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin: 4px 0;
+}
+.source-check-item {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  min-width: 72px;
+}
+.source-check-item text {
+  font-size: 14px;
+}
 .sl-slider {
   width: 100%;
   min-width: 80px;

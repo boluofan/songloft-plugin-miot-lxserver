@@ -23,6 +23,7 @@ const pageState = {
   createState(input, {}) {
     const transition = ref(String(state.config.song_transition_offset));
     const announcementDelay = ref(String(state.config.play_announcement_delay));
+    const smartResumeTimeout = ref(String(state.config.smart_resume_timeout));
     const clearingFailures = ref(false);
     async function clearPlaybackFailures() {
       if (clearingFailures.value) return;
@@ -169,6 +170,8 @@ const pageState = {
       if (key === 'song_transition_offset') transition.value = String(value);
       if (key === 'play_announcement_delay')
         announcementDelay.value = String(value);
+      if (key === 'smart_resume_timeout')
+        smartResumeTimeout.value = String(value);
       try {
         await saveConfig({ [key]: value });
       } catch (error) {
@@ -181,6 +184,7 @@ const pageState = {
     const bindings = {
       transition,
       announcementDelay,
+      smartResumeTimeout,
       clearingFailures,
       clearPlaybackFailures,
       coverOptions,
@@ -289,6 +293,36 @@ export default function PlaybackSettings(props: any) {
           ></SlSwitch>
         </SettingRow>
         <NativeView className="form-body">
+          <NativeView className="field">
+            <NativeView className="field-label">
+              <text>智能续播等待上限（秒）</text>
+            </NativeView>
+            <SlInput
+              modelValue={vm.smartResumeTimeout}
+              type="number"
+              min={5}
+              max={120}
+              step={1}
+              unit="秒"
+              aria-label="智能续播等待上限"
+              onUpdateModelValue={($event: any) => {
+                vm.smartResumeTimeout = $event;
+              }}
+              onChange={($event: any) => {
+                vm.saveNumber(
+                  'smart_resume_timeout',
+                  vm.smartResumeTimeout,
+                  5,
+                  120,
+                );
+              }}
+            ></SlInput>
+            <NativeView className="field-help">
+              <text>
+                语音播报后等待音箱空闲并重推歌曲的最长等待时间。超时未完成则放弃续播。
+              </text>
+            </NativeView>
+          </NativeView>
           <SlButton
             variant="outlined"
             label={vm.clearingFailures ? '正在清除…' : '清除播放失败标记'}
@@ -447,13 +481,36 @@ export default function PlaybackSettings(props: any) {
             </NativeView>
             <NativeView className="field">
               <NativeView className="field-label">
+                <text>公告等待方式</text>
+              </NativeView>
+              <SlSelect
+                modelValue={vm.state.config.play_announcement_wait_mode || 'auto'}
+                options={[
+                  { value: 'auto', label: '自动估算（推荐）' },
+                  { value: 'fixed', label: '固定等待' },
+                  { value: 'poll', label: '轮询设备状态' },
+                ]}
+                aria-label="公告等待方式"
+                onUpdateModelValue={($event: any) => {
+                  vm.state.config.play_announcement_wait_mode = $event;
+                  vm.saveConfig({ play_announcement_wait_mode: $event });
+                }}
+              ></SlSelect>
+              <NativeView className="field-help">
+                <text>
+                  播报后如何判断可以起播。自动估算按文字长度；固定等待用下方秒数；轮询会反复询问设备，兼容性最好但更耗时。
+                </text>
+              </NativeView>
+            </NativeView>
+            <NativeView className="field">
+              <NativeView className="field-label">
                 <text>公告等待时间（秒）</text>
               </NativeView>
               <SlInput
                 modelValue={vm.announcementDelay}
                 type="number"
                 min={0}
-                max={30}
+                max={10}
                 step={1}
                 unit="秒"
                 aria-label="公告等待时间"
@@ -465,10 +522,13 @@ export default function PlaybackSettings(props: any) {
                     'play_announcement_delay',
                     vm.announcementDelay,
                     0,
-                    30,
+                    10,
                   );
                 }}
               ></SlInput>
+              <NativeView className="field-help">
+                <text>仅在「固定等待」模式下生效，范围 0 到 10 秒。</text>
+              </NativeView>
             </NativeView>
           </NativeView>
         ) : null}

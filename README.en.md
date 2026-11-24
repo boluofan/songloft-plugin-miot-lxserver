@@ -58,7 +58,9 @@ Settings → Voice → **Built-in LX Music source (lxserver)**:
 - **Server URL**: e.g. `https://lx.example.com:9527`.
 - **User token**: optional (`lx_tk_...`). The plugin resolves the username through `/api/user/auth/verify` and authenticates with a paired `x-user-name` + `x-user-token`; leaving it empty means anonymous access to public sources only.
 - **Default quality**: `320k` (default) / `flac` / `128k`; URL resolution degrades through `flac → 320k → 128k`.
-- **Sources**: kw / kg / tx / wy / mg searched concurrently, ranked and deduplicated by match score.
+- **Quality fallback** (on by default): when off, only the selected quality is requested and no lower-quality fallback is attempted.
+- **Sources**: kw / kg / tx / wy / mg, multi-select (at least one required), searched concurrently and ranked/deduplicated by match score.
+- **Search timeout**: 1–30 seconds (default 6); **URL timeout**: 3–60 seconds (default 12).
 - **Online artist queue** (off by default): when the local library has no songs for the requested artist, lxserver fetches a batch of that artist's popular songs and plays the whole queue instead of just the first hit. **Only the `tx` and `wy` sources support artist lookup**; other sources are skipped. If no direct URL can be resolved it falls back to the previous "play only the top-1 track" behaviour. The queue is temporary (nothing is imported), and only the first 2 tracks are resolved before playback starts — the rest are resolved just before they are needed, so a 10-track queue does not delay first playback by several seconds.
 
 Both search response shapes are supported (legacy bare array and v2.1.3+ `{list,...}` object). All field mapping and compatibility fallbacks live in `src/lxserver/provider.ts`, so adapting to future server changes touches one place only.
@@ -88,7 +90,14 @@ Search priority, match threshold, timeout, **direct-link play without import**, 
   - Built-in lxserver: the reference holds the `platform + track identity`, so the URL is re-fetched by id.
   - External topone sources: such sources usually only expose a search endpoint, with no "get URL by id". The reference therefore records **how the track was found** (source id, search keyword, and title/artist/duration hints) and playback simply re-runs that search. If the original source was removed or failed transiently, the remaining enabled sources are tried in configured order.
 
-> The first release covers online search and direct-link playback only. Lyrics, playlist reading, AI recommendations and multi-user / per-room playlists are not implemented yet; extension points are reserved.
+### Playback handoff
+
+Under **Settings → Playback → Advanced voice handoff**:
+
+- **Announcement wait mode**: how the plugin decides playback can start after announcing the song name — estimated from text length (default) / fixed delay / poll device state (best compatibility but slower). The "announcement delay" (0–10 seconds) applies only in fixed-delay mode.
+- **Smart-resume timeout**: 5–120 seconds (default 30), the maximum time to wait for the speaker to go idle and re-push the song after a voice announcement.
+
+> AI recommendations and multi-user / per-room playlists are not implemented yet; extension points are reserved. Lyrics matching and local playlist reading are implemented.
 
 ## Releases
 

@@ -19,6 +19,7 @@ import {
 import SectionCard from '../../ui/SectionCard.tsx';
 import SettingRow from '../../ui/SettingRow.tsx';
 import SlButton from '../../ui/SlButton.tsx';
+import SlCheckbox from '../../ui/SlCheckbox.tsx';
 import SlIcon from '../../ui/SlIcon.tsx';
 import SlInput from '../../ui/SlInput.tsx';
 import SlSelect from '../../ui/SlSelect.tsx';
@@ -179,6 +180,22 @@ const pageState = {
     );
     const externalSearchTimeout = ref(
       String(state.config.external_search_timeout),
+    );
+    const lxSearchTimeout = ref(
+      String(state.config.lxserver.searchTimeout ?? 6),
+    );
+    const lxUrlTimeout = ref(String(state.config.lxserver.urlTimeout ?? 12));
+    watch(
+      () => state.config.lxserver.searchTimeout,
+      (value) => {
+        lxSearchTimeout.value = String(value);
+      },
+    );
+    watch(
+      () => state.config.lxserver.urlTimeout,
+      (value) => {
+        lxUrlTimeout.value = String(value);
+      },
     );
     const webhookName = ref('');
     const webhookUrl = ref('');
@@ -759,6 +776,38 @@ const pageState = {
     function saveLxserver(patch: Partial<LXServerConfig>): void {
       void saveConfig({ lxserver: { ...state.config.lxserver, ...patch } });
     }
+    const lxSourceOrder = ['kw', 'kg', 'tx', 'wy', 'mg'];
+    function toggleLxSource(source: string, enabled: boolean): void {
+      const current = Array.isArray(state.config.lxserver.sources)
+        ? [...state.config.lxserver.sources]
+        : [];
+      const next = enabled
+        ? [...current, source]
+        : current.filter((s) => s !== source);
+      if (!next.length) {
+        notify('至少保留一个搜索音源', 'error');
+        return;
+      }
+      const deduped = [...new Set(next)];
+      saveLxserver({
+        sources: lxSourceOrder.filter((s) => deduped.includes(s)),
+      });
+    }
+    function saveLxNumber(
+      key: 'searchTimeout' | 'urlTimeout',
+      raw: string,
+      min: number,
+      max: number,
+    ): void {
+      const parsed = Number.parseInt(raw, 10);
+      const value = Math.max(
+        min,
+        Math.min(max, Number.isNaN(parsed) ? min : parsed),
+      );
+      if (key === 'searchTimeout') lxSearchTimeout.value = String(value);
+      else lxUrlTimeout.value = String(value);
+      saveLxserver({ [key]: value } as Partial<LXServerConfig>);
+    }
     async function refreshSearchProviders(): Promise<void> {
       await loadSearchProviders();
       if (
@@ -831,6 +880,11 @@ const pageState = {
       maxMemory,
       songMatchThreshold,
       externalSearchTimeout,
+      lxSearchTimeout,
+      lxUrlTimeout,
+      lxSourceOrder,
+      toggleLxSource,
+      saveLxNumber,
       webhookName,
       webhookUrl,
       commandInputs,
@@ -907,6 +961,7 @@ const pageState = {
       SectionCard,
       SettingRow,
       SlButton,
+      SlCheckbox,
       SlIcon,
       SlInput,
       SlSelect,
@@ -1940,6 +1995,18 @@ export default function VoiceSettings(props: any) {
               }}
             ></SlSwitch>
           </SettingRow>
+          <SettingRow
+            title="音质降级"
+            subtitle="高音质无直链时自动尝试较低音质；关闭则只请求选定音质"
+          >
+            <SlSwitch
+              aria-label="音质降级"
+              modelValue={vm.state.config.lxserver.allowQualityFallback}
+              onUpdateModelValue={($event: any) => {
+                vm.saveLxserver({ allowQualityFallback: !!$event });
+              }}
+            ></SlSwitch>
+          </SettingRow>
           <NativeView className="form-body">
             <NativeView className="field">
               <NativeView className="field-label"><text>服务地址</text></NativeView>
@@ -1981,7 +2048,76 @@ export default function VoiceSettings(props: any) {
             </NativeView>
             <NativeView className="field">
               <NativeView className="field-label"><text>搜索音源</text></NativeView>
-              <text>kw, kg, tx, wy, mg（全部并发搜索，按顺序去重）</text>
+              <NativeView className="source-check-grid">
+                {vm.lxSourceOrder.map((source: string) => (
+                  <NativeView
+                    key={source}
+                    className="source-check-item"
+                  >
+                    <SlCheckbox
+                      modelValue={vm.state.config.lxserver.sources.includes(
+                        source,
+                      )}
+                      onUpdateModelValue={(checked: any) => {
+                        vm.toggleLxSource(source, !!checked);
+                      }}
+                    ></SlCheckbox>
+                    <text>{source}</text>
+                  </NativeView>
+                ))}
+              </NativeView>
+              <NativeView className="field-help">
+                <text>
+                  可多选，至少保留一个。选中的音源并发搜索，按顺序去重；歌手在线检索仅 tx / wy 支持。
+                </text>
+              </NativeView>
+            </NativeView>
+            <NativeView className="field-grid">
+              <NativeView className="field">
+                <NativeView className="field-label">
+                  <text>搜索超时（秒）</text>
+                </NativeView>
+                <SlInput
+                  modelValue={vm.lxSearchTimeout}
+                  type="number"
+                  min={1}
+                  max={30}
+                  step={1}
+                  unit="秒"
+                  aria-label="搜索超时"
+                  onUpdateModelValue={($event: any) => {
+                    vm.lxSearchTimeout = $event;
+                  }}
+                  onChange={($event: any) => {
+                    vm.saveLxNumber(
+                      'searchTimeout',
+                      vm.lxSearchTimeout,
+                      1,
+                      30,
+                    );
+                  }}
+                ></SlInput>
+              </NativeView>
+              <NativeView className="field">
+                <NativeView className="field-label">
+                  <text>直链超时（秒）</text>
+                </NativeView>
+                <SlInput
+                  modelValue={vm.lxUrlTimeout}
+                  type="number"
+                  min={3}
+                  max={60}
+                  step={1}
+                  unit="秒"
+                  aria-label="直链超时"
+                  onUpdateModelValue={($event: any) => {
+                    vm.lxUrlTimeout = $event;
+                  }}
+                  onChange={($event: any) => {
+                    vm.saveLxNumber('urlTimeout', vm.lxUrlTimeout, 3, 60);
+                  }}
+                ></SlInput>
+              </NativeView>
             </NativeView>
             <NativeView className="field-actions">
               <SlButton
