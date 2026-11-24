@@ -13,7 +13,7 @@ import type { ExternalSearchSource } from '../types';
 import type { PlaylistManager } from '../player/manager';
 import { LxServerProvider } from '../lxserver/provider';
 import type { LXMissReason } from '../lxserver/provider';
-import type { LXArtistQueue } from '../lxserver/provider';
+import type { LXArtistQueue, LXChartQueue, LXQueueItem } from '../lxserver/provider';
 import { PLUGIN_ENTRY_PATH, buildSongRef, buildToponeRef, isOwnSongRef, toponeDedupKey } from '../lxserver/ref';
 import type { ToponeSongRef } from '../lxserver/ref';
 import { createProviderCache } from '../lxserver/provider_cache';
@@ -418,56 +418,10 @@ export class OnlineSearcher {
     }
     if (!queue || queue.items.length === 0) return null;
 
-    // 已解析好的「音箱可播 URL」缓存（直链 → 必要时转码代理）+ 解析时刻。
-    // 带时刻是因为直链有签名有效期：过期后必须重解析，否则拿将死的链接去播必然失败。
-    const resolved = new Map<number, { url: string; at: number }>();
-    const freshUrl = (index: number): string => {
-      const entry = resolved.get(index);
-      return entry && Date.now() - entry.at < DIRECT_URL_TTL_MS ? entry.url : '';
-    };
-    const inflight = new Map<number, Promise<string>>();
-    // 不递归的 lookahead：解析 i 时预解析 i+1/i+2，但那两首不再继续往后推。
-    const resolveOne = async (index: number, lookahead: boolean): Promise<string> => {
-      if (index < 0 || index >= queue.items.length) return '';
-      const cached = freshUrl(index);
-      if (cached) return cached;
-      let pending = inflight.get(index);
-      if (!pending) {
-        pending = (async () => {
-          const item = queue.items[index];
-          // 缓存的直链可能已过期，但曲目元数据（raw songInfo）可复用，只需重新解析直链。
-          const playable = await provider.resolveTrackUrl(item.track);
-          item.playable = playable;
-          const pushUrl = await this.resolveDirectPushUrl(playable.url, item.track.duration);
-          resolved.set(index, { url: pushUrl, at: Date.now() });
-          return pushUrl;
-        })().finally(() => inflight.delete(index));
-        inflight.set(index, pending);
-      }
-      const url = await pending;
-      if (lookahead) {
-        void resolveOne(index + 1, false).catch(() => undefined);
-        void resolveOne(index + 2, false).catch(() => undefined);
-      }
-      return url;
-    };
-
-    // 首批：provider 已解析直链，这里只需补转码代理判定（不发网络请求）。
-    if (!importMode) {
-      await Promise.all(
-        queue.items.slice(0, preResolve).map(async (item, index) => {
-          if (!item.playable) return;
-          try {
-            const pushUrl = await this.resolveDirectPushUrl(item.playable.url, item.track.duration);
-            if (pushUrl) resolved.set(index, { url: pushUrl, at: Date.now() });
-          } catch { /* 单首失败不影响队列 */ }
-        }),
-      );
-
-      if (resolved.size === 0) {
-        songloft.log.warn('[OnlineSearcher] lxserver artist queue: no playable url after pre-resolve');
-        return null;
-      }
+    const resolver = await this.createQueueResolver(queue.items, importMode, preResolve);
+    if (!resolver) {
+      songloft.log.warn('[OnlineSearcher] lxserver artist queue: no playable url after pre-resolve');
+      return null;
     }
 
     const items: OnlineSearchResult[] = queue.items.map((item) => ({
@@ -488,7 +442,7 @@ export class OnlineSearcher {
 
     songloft.log.info(
       `[OnlineSearcher] lxserver artist queue "${queue.artistName}" total=${queue.total} ` +
-      `take=${items.length} mode=${importMode ? 'import' : 'push'} preResolved=${resolved.size}`,
+      `take=${items.length} mode=${importMode ? 'import' : 'push'} preResolved=${resolver.preResolved}`,
     );
 
     return {
@@ -496,8 +450,138 @@ export class OnlineSearcher {
       total: queue.total,
       mode: importMode ? 'import' : 'push',
       items,
-      peekUrl: (index: number) => freshUrl(index),
+      peekUrl: resolver.peekUrl,
+      resolveUrl: resolver.resolveUrl,
+    };
+  }
+
+  /**
+   * 在线队列的懒解析核心（歌手队列 / 榜单队列共用）。
+   *
+   * 直链是签名 CDN，解析那一刻开始倒计时：带解析时刻做 TTL 判定（过期必须重解析），
+   * inflight 去重避免同一首并发解析，lookahead 解析 i 时预取 i+1/i+2（不递归）。
+   * importMode 下不解析任何直链（宿主回调现取），首批失败返回 null 让上层回退。
+   */
+  private async createQueueResolver(
+    items: LXQueueItem[],
+    importMode: boolean,
+    preResolve: number,
+  ): Promise<{
+    peekUrl: (index: number) => string;
+    resolveUrl: (index: number) => Promise<string>;
+    preResolved: number;
+  } | null> {
+    const provider = await this.getLxProvider();
+    if (!provider) return null;
+    const resolved = new Map<number, { url: string; at: number }>();
+    const freshUrl = (index: number): string => {
+      const entry = resolved.get(index);
+      return entry && Date.now() - entry.at < DIRECT_URL_TTL_MS ? entry.url : '';
+    };
+    const inflight = new Map<number, Promise<string>>();
+    const resolveOne = async (index: number, lookahead: boolean): Promise<string> => {
+      if (index < 0 || index >= items.length) return '';
+      const cached = freshUrl(index);
+      if (cached) return cached;
+      let pending = inflight.get(index);
+      if (!pending) {
+        pending = (async () => {
+          const item = items[index];
+          // 缓存直链可能已过期，但 raw songInfo 可复用，只需重新解析直链。
+          const playable = await provider.resolveTrackUrl(item.track);
+          item.playable = playable;
+          const pushUrl = await this.resolveDirectPushUrl(playable.url, item.track.duration);
+          resolved.set(index, { url: pushUrl, at: Date.now() });
+          return pushUrl;
+        })().finally(() => inflight.delete(index));
+        inflight.set(index, pending);
+      }
+      const url = await pending;
+      if (lookahead) {
+        void resolveOne(index + 1, false).catch(() => undefined);
+        void resolveOne(index + 2, false).catch(() => undefined);
+      }
+      return url;
+    };
+
+    if (!importMode) {
+      // 首批：provider 已解析直链，这里只补转码代理判定（不发网络请求）。
+      await Promise.all(
+        items.slice(0, preResolve).map(async (item, index) => {
+          if (!item.playable) return;
+          try {
+            const pushUrl = await this.resolveDirectPushUrl(item.playable.url, item.track.duration);
+            if (pushUrl) resolved.set(index, { url: pushUrl, at: Date.now() });
+          } catch { /* 单首失败不影响队列 */ }
+        }),
+      );
+      if (resolved.size === 0) return null;
+    }
+
+    return {
+      peekUrl: freshUrl,
       resolveUrl: (index: number) => (importMode ? Promise.resolve('') : resolveOne(index, true)),
+      preResolved: resolved.size,
+    };
+  }
+
+  /**
+   * 榜单在线歌曲：榜单名（如「热歌榜」）→ 整队播放。
+   * 与歌手队列共用同一套懒解析 + lookahead + TTL + push/import 两态，仅曲目来源不同。
+   */
+  async searchChartQueue(
+    chartName: string,
+    opts?: { limit?: number; preResolve?: number; importMode?: boolean },
+  ): Promise<OnlineArtistQueue | null> {
+    const name = (chartName || '').replace(/\s+/g, ' ').trim();
+    if (!name) return null;
+
+    const provider = await this.getLxProvider();
+    if (!provider || !provider.isConfigured()) return null;
+
+    const importMode = opts?.importMode === true;
+    const limit = Math.max(1, Math.min(20, opts?.limit ?? 10));
+    const preResolve = importMode ? 0 : Math.max(1, Math.min(limit, opts?.preResolve ?? 2));
+    let queue: LXChartQueue | null;
+    try {
+      queue = await provider.chartQueue(name, limit, preResolve);
+    } catch (e) {
+      songloft.log.warn('[OnlineSearcher] lxserver chart queue error: ' + String(e));
+      return null;
+    }
+    if (!queue || queue.items.length === 0) return null;
+
+    const resolver = await this.createQueueResolver(queue.items, importMode, preResolve);
+    if (!resolver) {
+      songloft.log.warn('[OnlineSearcher] lxserver chart queue: no playable url after pre-resolve');
+      return null;
+    }
+
+    const items: OnlineSearchResult[] = queue.items.map((item) => ({
+      title: item.track.name,
+      artist: item.track.singer || queue.chartName,
+      album: item.track.album || undefined,
+      duration: item.track.duration || undefined,
+      cover_url: item.track.cover || undefined,
+      dedup_key: `lxserver:${item.track.source}:${item.track.id}`,
+      plugin_entry_path: PLUGIN_ENTRY_PATH,
+      source_data: buildSongRef(item.track, item.playable?.type),
+      hit_source: 'lxserver',
+    }));
+
+    songloft.log.info(
+      `[OnlineSearcher] lxserver chart queue "${queue.chartName}" source=${queue.source} ` +
+      `total=${queue.total} take=${items.length} mode=${importMode ? 'import' : 'push'} ` +
+      `preResolved=${resolver.preResolved}`,
+    );
+
+    return {
+      artistName: queue.chartName,
+      total: queue.total,
+      mode: importMode ? 'import' : 'push',
+      items,
+      peekUrl: resolver.peekUrl,
+      resolveUrl: resolver.resolveUrl,
     };
   }
 

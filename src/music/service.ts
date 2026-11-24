@@ -25,7 +25,7 @@ import { parseTimeDuration, parseSongsCount, parseSongIndex, detectSleepTimerMod
 import type { PlaylistManager } from '../player/manager';
 import type { SongLocation, ArtistSongLocation } from '../indexing/manager';
 import type { MemoryRecord } from '../memory';
-import type { OnlineSearchResult } from '../voicecmd/online_searcher';
+import type { OnlineSearchResult, OnlineArtistQueue } from '../voicecmd/online_searcher';
 import type { ConversationMessage, VoiceCommand, PlayMode, AIAnalysisResult, SearchPriority } from '../types';
 import { getDefaultVoiceCommands } from '../voicecmd/defaults';
 import { conversationQuery, traceConversation } from '../conversation/query';
@@ -125,6 +125,7 @@ export interface CommandTestResult {
 /** 口令类型优先级（数字越小优先级越高） */
 const COMMAND_PRIORITY: Record<string, number> = {
   'play_artist': 1,
+  'play_chart': 1,
   'play_song': 1,
   'play_playlist': 2,
   'play_index': 2,
@@ -154,7 +155,7 @@ const URL_HEALTH_CHECK_TIMEOUT_MS = 3000;
 
 // resume 必须进入真实语音消息的固定控制匹配，否则停止后的「继续播放」无法恢复自动切歌（songloft-org/songloft#490）。
 const FIXED_CONTROL_COMMAND_TYPES = new Set(['set_play_mode', 'set_volume', 'favorite', 'next', 'previous', 'resume', 'stop', 'sleep_timer', 'cancel_sleep_timer', 'query_sleep_timer', 'play_index']);
-const SEARCH_COMMAND_TYPES = new Set(['play_song', 'play_playlist', 'play_artist']);
+const SEARCH_COMMAND_TYPES = new Set(['play_song', 'play_playlist', 'play_artist', 'play_chart']);
 const BUILTIN_STOP_KEYWORDS = ['暂停播放', '停止播放', '暂停音乐', '停一下', 'pause', 'stop', '暂停'];
 
 /** 只为有明确音乐请求线索的分析失败播报提示；未识别的普通请求仍交给小爱。 */
@@ -910,6 +911,14 @@ export class MusicCommandService {
       case 'play_artist':
         playedSong = await this.executePlayArtist(result.argument, accountId, deviceId);
         break;
+      case 'play_chart':
+        // 关键词本身含榜名（如「播放热歌榜」）时 argument 为空，用 keyword 剥掉播放动词兜底。
+        playedSong = await this.executePlayChart(
+          result.argument || result.keyword.replace(/^(播放|放|来(一)?(个|份|首)?)\s*/u, ''),
+          accountId,
+          deviceId,
+        );
+        break;
       case 'set_play_mode':
         await this.executeSetPlayMode(accountId, deviceId, result.command.param || result.argument);
         break;
@@ -981,6 +990,15 @@ export class MusicCommandService {
           return null;
         }
         playedSong = await this.executePlayArtist(artist, accountId, deviceId);
+        break;
+      }
+      case 'play_chart': {
+        const chart = result.params.chart || result.params.name || '';
+        if (!chart) {
+          songloft.log.warn('[MusicCommandService] [AI] play_chart: no chart name');
+          return null;
+        }
+        playedSong = await this.executePlayChart(chart, accountId, deviceId);
         break;
       }
       case 'play_playlist': {
@@ -1452,11 +1470,27 @@ export class MusicCommandService {
       return null;
     }
 
+    return this.playOnlineQueue(queue, `歌手: ${queue.artistName}`, artistName, pm, started);
+  }
+
+  /**
+   * 把在线队列（歌手/榜单共用）投放到播放器。
+   *   - 'import'：整队入库成解析型，播放时宿主回调本插件 /api/music/url 现解析；
+   *   - 'push'  ：临时队列不入库，曲目 url 留空，临播前由 setSongUrlResolver 钩子补（直链有 TTL）。
+   */
+  private async playOnlineQueue(
+    queue: OnlineArtistQueue,
+    label: string,
+    fallbackName: string,
+    pm: PlaylistManager,
+    started: number,
+    kind = 'artist',
+  ): Promise<PlayedSong | null> {
     // 入库形态：整队写进曲库（解析型），再按真实 id 起播——收藏/已播放/重播都能正常工作。
     if (queue.mode === 'import') {
       const imported = await this.onlineSearcher.importSongs(queue.items);
       if (!imported || imported.length === 0) {
-        songloft.log.warn(`[MusicCommandService] artist queue import failed for "${artistName}"`);
+        songloft.log.warn(`[MusicCommandService] ${kind} queue import failed for "${fallbackName}"`);
         return null;
       }
       const songs: any[] = [];
@@ -1479,19 +1513,19 @@ export class MusicCommandService {
 
       pm.setSongUrlResolver(null); // 入库形态不需要懒解析钩子，宿主会自己解析
       pm.setAnnounceOnSongChange(true);
-      const ok = await pm.playWithSongs(songs, 0, 'order', `歌手: ${queue.artistName}`, '', undefined, false);
+      const ok = await pm.playWithSongs(songs, 0, 'order', label, '', undefined, false);
       if (!ok) {
-        songloft.log.warn(`[MusicCommandService] artist queue (import) playback failed for "${artistName}"`);
+        songloft.log.warn(`[MusicCommandService] ${kind} queue (import) playback failed for "${fallbackName}"`);
         return null;
       }
       const current = pm.getCurrentSong();
       songloft.log.info(
-        `[MusicCommandService] lxserver artist queue (import) playing: artist="${queue.artistName}" ` +
+        `[MusicCommandService] lxserver ${kind} queue (import) playing: ${kind}="${queue.artistName}" ` +
         `total=${queue.total} queue=${songs.length} firstIn=${Date.now() - started}ms`,
       );
       return {
         songId: current?.id,
-        songName: current?.title || artistName,
+        songName: current?.title || fallbackName,
         artist: current?.artist || queue.artistName,
       };
     }
@@ -1507,7 +1541,6 @@ export class MusicCommandService {
         cover_url: item.cover_url || '',
         // 曲目一律留空，起播时才向钩子取 URL：直链有签名时效（DIRECT_URL_TTL_MS），
         // 若在这里就把预解析的直链写死，用户中途长时间暂停后再播就会拿到过期链接。
-        // 已解析过的首曲在钩子里是 Map 命中，不额外发请求，起播延迟可忽略。
         url: '',
         type: 'remote',
       };
@@ -1521,23 +1554,69 @@ export class MusicCommandService {
     });
 
     pm.setAnnounceOnSongChange(true);
-    const ok = await pm.playWithSongs(songs, 0, 'order', `歌手: ${queue.artistName}`, '', undefined, false);
+    const ok = await pm.playWithSongs(songs, 0, 'order', label, '', undefined, false);
     if (!ok) {
-      songloft.log.warn(`[MusicCommandService] lxserver artist queue playback failed for "${artistName}"`);
+      songloft.log.warn(`[MusicCommandService] lxserver ${kind} queue playback failed for "${fallbackName}"`);
       pm.setSongUrlResolver(null);
       return null;
     }
 
     const current = pm.getCurrentSong();
     songloft.log.info(
-      `[MusicCommandService] lxserver artist queue playing: artist="${queue.artistName}" ` +
+      `[MusicCommandService] lxserver ${kind} queue playing: ${kind}="${queue.artistName}" ` +
       `total=${queue.total} queue=${songs.length} firstIn=${Date.now() - started}ms`,
     );
     return {
       songId: current?.id,
-      songName: current?.title || artistName,
+      songName: current?.title || fallbackName,
       artist: current?.artist || queue.artistName,
     };
+  }
+
+  /** 榜单播放：说「播放热歌榜」直接整队播放该榜曲目，无需本地曲库（榜单是纯在线能力）。 */
+  private async executePlayChart(chartName: string, accountId: string, deviceId: string): Promise<PlayedSong | null> {
+    this.cancelPendingResume(accountId, deviceId);
+    const pm = await this.playlistManagerMap.getOrCreate(accountId, deviceId);
+    const cleanName = chartName.replace(/的?(歌曲|歌|音乐)\s*$/u, '').replace(/\s+/g, ' ').trim();
+    if (!cleanName) {
+      songloft.log.warn('[MusicCommandService] play_chart: empty chart name');
+      return null;
+    }
+
+    pm.prepareForNewPlayback();
+    try {
+      await this.minaService.stopPlay(accountId, deviceId);
+    } catch (e) {
+      songloft.log.warn('[MusicCommandService] Failed to interrupt broadcast: ' + String(e));
+    }
+
+    let noImport = true;
+    try {
+      const cfg = await this.configManager.getConfig();
+      noImport = cfg.external_search_no_import === true;
+    } catch (e) {
+      songloft.log.warn('[MusicCommandService] read external_search_no_import failed: ' + String(e));
+    }
+
+    const started = Date.now();
+    const ttsTask = this.minaService
+      .textToSpeech(accountId, deviceId, `正在加载榜单${cleanName}`)
+      .catch((e) => { songloft.log.warn('[MusicCommandService] chart queue TTS failed: ' + String(e)); });
+
+    const [queue] = await Promise.all([
+      this.onlineSearcher.searchChartQueue(
+        cleanName,
+        noImport ? { limit: 20, preResolve: 2 } : { limit: 20, importMode: true },
+      ),
+      ttsTask,
+    ]);
+    if (!queue || queue.items.length === 0) {
+      songloft.log.warn(`[MusicCommandService] lxserver chart queue empty for "${cleanName}" (${Date.now() - started}ms)`);
+      await this.minaService.textToSpeech(accountId, deviceId, `没找到榜单${cleanName}`);
+      return null;
+    }
+
+    return this.playOnlineQueue(queue, `榜单: ${queue.artistName}`, cleanName, pm, started, 'chart');
   }
 
   private normalizeSearchPriority(priority: unknown): SearchPriority {

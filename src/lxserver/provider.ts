@@ -5,7 +5,7 @@
 /// <reference types="@songloft/plugin-sdk" />
 
 import { LxServerClient } from './client';
-import type { LXArtist, LXPlayableUrl, LXServerConfig, LXTrack } from './types';
+import type { LXArtist, LXLeaderboard, LXPlayableUrl, LXServerConfig, LXTrack } from './types';
 import type { LXSongRef } from './ref';
 import { buildSongRef } from './ref';
 import { normalizeLyric } from './lyric';
@@ -98,6 +98,31 @@ export interface LXArtistQueue {
   /** 该歌手在源上可用的歌曲总数（未按 limit 截断） */
   total: number;
   items: LXQueueItem[];
+}
+
+/** 榜单在线歌曲解析结果（结构与歌手队列对齐，便于 online_searcher 复用同一套懒解析管线） */
+export interface LXChartQueue {
+  /** 实际命中的榜单名（lxserver boards 返回的 name） */
+  chartName: string;
+  /** 命中来源 */
+  source: string;
+  /** 榜单曲目总数（未按 limit 截断） */
+  total: number;
+  items: LXQueueItem[];
+}
+
+/**
+ * 榜单名匹配分：精确 > 双向包含；「热歌榜」这类短名要能命中「抖音热歌榜」等长名，
+ * 但同档优先更短更贴切的那个（避免「热歌榜」被「欧美热歌榜」抢走）。
+ */
+function boardMatchScore(boardName: string, target: string): number {
+  const actual = normalizeText(boardName);
+  if (!actual || !target) return 0;
+  if (actual === target) return 100;
+  if (actual.includes(target) || target.includes(actual)) {
+    return Math.max(10, 50 - Math.abs(actual.length - target.length) * 2);
+  }
+  return 0;
 }
 
 /** 直链可播性：音箱（player_play_url）只可靠播放 mp3；其余交给播放链路的转码代理。
@@ -381,7 +406,109 @@ export class LxServerProvider {
     };
   }
 
-  /** 按需解析单首直链（歌手队列懒解析用；失败由调用方跳过该首） */
+  /**
+   * 榜单歌曲：榜单名 → 该榜的曲目列表。
+   *
+   * 榜单目录是服务端硬编码静态表（各源名不同、id 不同），所以别名匹配只走 boards 返回的
+   * name，绝不硬编码 bangid。按用户配置的 sources 顺序逐源找，精确命中即停。
+   *
+   * 首批只解析 preResolve 首直链，其余交给播放链路临播前补（与歌手队列同款懒解析）。
+   */
+  async chartQueue(name: string, limit = 10, preResolve = 2): Promise<LXChartQueue | null> {
+    this.lastMissReason = null;
+    if (!this.isConfigured()) return null;
+    const query = name.replace(/\s+/g, ' ').trim();
+    const target = normalizeText(query);
+    if (!target) return null;
+
+    // 榜单五源全部支持（与歌手检索只有部分源支持不同）。先跨源收集所有目录候选再统一挑，
+    // 这样「欧美热歌榜」的精确命中能压过先配源里「热歌榜」的包含命中；同分才按 sources 顺序。
+    const candidates: Array<{ board: LXLeaderboard; source: string; score: number; order: number }> = [];
+    let order = 0;
+    for (const source of this.cfg.sources) {
+      let boards: LXLeaderboard[];
+      try {
+        boards = await this.client.leaderboardBoards(source);
+      } catch (e) {
+        songloft.log.warn(`[LxServerProvider] chart queue boards ${source} failed: ${String(e)}`);
+        continue;
+      }
+      for (const board of boards) {
+        const score = boardMatchScore(board.name, target);
+        if (score > 0) candidates.push({ board, source, score, order: order++ });
+      }
+    }
+    if (candidates.length === 0) {
+      this.lastMissReason = 'no_candidates';
+      songloft.log.info('[LxServerProvider] chart queue: no board matched for ' + name);
+      return null;
+    }
+    candidates.sort((a, b) => b.score - a.score || a.order - b.order);
+
+    // 从最高分往下取曲目：命中但曲目为空/接口失败时继续试下一个候选。
+    let best: { board: LXLeaderboard; source: string; score: number } | null = null;
+    let bestTracks: LXTrack[] = [];
+    for (const candidate of candidates.slice(0, 5)) {
+      let tracks: LXTrack[];
+      try {
+        tracks = (await this.client.leaderboardList(candidate.source, candidate.board.bangid, 1))
+          .filter((t) => !!t.id && !!t.name);
+      } catch (e) {
+        songloft.log.warn(`[LxServerProvider] chart queue list ${candidate.source}/${candidate.board.bangid} failed: ${String(e)}`);
+        continue;
+      }
+      if (tracks.length > 0) {
+        best = candidate;
+        bestTracks = tracks;
+        break;
+      }
+    }
+
+    if (!best || bestTracks.length === 0) {
+      this.lastMissReason = 'no_candidates';
+      songloft.log.info('[LxServerProvider] chart queue: no board has songs for ' + name);
+      return null;
+    }
+
+    const take = Math.max(1, Math.min(50, limit));
+    const items: LXQueueItem[] = bestTracks.slice(0, take).map((track) => ({ track }));
+
+    // preResolve=0 表示入库型：不需要直链，宿主播放时自己回调解析。
+    const plan = Math.max(0, Math.min(take, preResolve));
+    if (plan > 0) {
+      await Promise.all(
+        items.slice(0, plan).map(async (item) => {
+          try {
+            item.playable = await this.client.resolveUrlLadder(item.track.raw);
+          } catch (e) {
+            songloft.log.warn(
+              `[LxServerProvider] chart queue url failed for ${item.track.name}: ${String(e)}`,
+            );
+          }
+        }),
+      );
+    }
+
+    const playableCount = items.filter((i) => !!i.playable).length;
+    if (plan > 0 && playableCount === 0) {
+      this.lastMissReason = 'no_playable_url';
+      songloft.log.warn('[LxServerProvider] chart queue: no playable url in first batch for ' + name);
+      return null;
+    }
+
+    songloft.log.info(
+      `[LxServerProvider] chart queue "${best.board.name}" source=${best.board.source} ` +
+      `songs=${bestTracks.length} take=${items.length} preResolved=${playableCount}`,
+    );
+    return {
+      chartName: best.board.name,
+      source: String(best.board.source),
+      total: bestTracks.length,
+      items,
+    };
+  }
+
+  /** 按需解析单首直链（歌手/榜单队列懒解析用；失败由调用方跳过该首） */
   async resolveTrackUrl(track: LXTrack): Promise<LXPlayableUrl> {
     return this.client.resolveUrlLadder(track.raw);
   }

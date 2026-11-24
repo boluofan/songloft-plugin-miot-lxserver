@@ -4,6 +4,7 @@ export function getDefaultVoiceCommands(): VoiceCommand[] {
   return [
     { type: 'play_playlist', keywords: ['播放歌单', '放歌单', '播放列表'], enabled: true },
     { type: 'play_artist', keywords: ['播放歌手'], enabled: true },
+    { type: 'play_chart', keywords: ['播放榜单', '播放热歌榜', '播放排行榜', '放榜单', '放榜'], enabled: true },
     { type: 'play_song', keywords: ['播放歌曲', '放歌曲', '我想听'], enabled: true },
     { type: 'play_index', keywords: ['播放第', '跳到第', '切到第', '跳转到第'], enabled: true },
     { type: 'set_play_mode', keywords: ['随机播放', '随机模式'], param: 'random', enabled: true },

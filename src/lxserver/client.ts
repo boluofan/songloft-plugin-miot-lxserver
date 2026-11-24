@@ -13,6 +13,7 @@ import {
   LxError,
   type LXArtist,
   type LXAuthState,
+  type LXLeaderboard,
   type LXPlayableUrl,
   type LXQuality,
   type LXServerConfig,
@@ -311,6 +312,43 @@ export class LxServerClient {
       this.cfg.urlTimeout * 1000,
     );
     const list = unwrapSearchList<Record<string, unknown>>(r, 'artistSongs');
+    return list.map((item) => this.toTrack(item));
+  }
+
+  /**
+   * 榜单目录：GET /api/music/leaderboard/boards?source=xx
+   * 该接口只有 source 一个参数（默认 kg），无需 token；服务端返回硬编码的静态榜单表。
+   */
+  async leaderboardBoards(source: string): Promise<LXLeaderboard[]> {
+    const q = new URLSearchParams({ source });
+    const r = await this.reqJSON<unknown>(
+      `/api/music/leaderboard/boards?${q.toString()}`,
+      { method: 'GET' },
+      this.cfg.searchTimeout * 1000,
+    );
+    const list = unwrapSearchList<Record<string, unknown>>(r, 'leaderboard/boards');
+    return list
+      .map((item) => ({
+        id: String(item.id ?? ''),
+        name: String(item.name ?? ''),
+        bangid: String(item.bangid ?? item.boardId ?? ''),
+        source: String(item.source ?? source),
+      }))
+      .filter((b) => !!b.name && !!b.bangid);
+  }
+
+  /**
+   * 榜单曲目：GET /api/music/leaderboard/list?source=&bangid=&page=
+   * bangid 必填（来自 boards，不是 id）；曲目字段与搜索同构，服务端已做 normalizeSongInfo。
+   */
+  async leaderboardList(source: string, bangid: string, page = 1): Promise<LXTrack[]> {
+    const q = new URLSearchParams({ source, bangid, page: String(Math.max(1, page)) });
+    const r = await this.reqJSON<unknown>(
+      `/api/music/leaderboard/list?${q.toString()}`,
+      { method: 'GET' },
+      this.cfg.urlTimeout * 1000,
+    );
+    const list = unwrapSearchList<Record<string, unknown>>(r, 'leaderboard/list');
     return list.map((item) => this.toTrack(item));
   }
 

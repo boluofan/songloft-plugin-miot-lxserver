@@ -337,6 +337,8 @@ export interface AIAnalysisResult {
   params: {
     name?: string;
     artist?: string;
+    /** play_chart：榜单名（热歌榜/飙升榜等） */
+    chart?: string;
     playlist?: string;
     mode?: string;
     volume?: number;

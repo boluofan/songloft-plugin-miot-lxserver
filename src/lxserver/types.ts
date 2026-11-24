@@ -73,6 +73,17 @@ export interface LXTrack {
   raw: Record<string, unknown>;
 }
 
+/** lxserver 榜单目录条目（GET /api/music/leaderboard/boards） */
+export interface LXLeaderboard {
+  /** 形如 `wy__3778678`，仅供展示；取曲目要用 bangid */
+  id: string;
+  /** 榜单名（热歌榜/飙升榜等），别名匹配靠它 */
+  name: string;
+  /** 取曲目时的必填参数 */
+  bangid: string;
+  source: string;
+}
+
 /** lxserver 歌手搜索条目（type=singer） */
 export interface LXArtist {
   id: string;
