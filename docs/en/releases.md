@@ -26,7 +26,7 @@ A dirty work tree is refused: the package is built from the tagged commit, so un
 
 ## What CI does
 
-`.github/workflows/release.yml` listens on `push: tags: ['v*']` and runs, in order:
+`.github/workflows/release-lxserver.yml` listens on `push: tags: ['v*']` and runs, in order:
 
 1. checkout the tag;
 2. verify `plugin.json.version` matches the tag and fail fast when it does not;

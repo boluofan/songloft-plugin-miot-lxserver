@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 生成 Release 正文：取「上一版 tag..本次 tag」之间的提交，按 Conventional Commits 类型分组。
 //
-// 供 .github/workflows/release.yml 在创建 Release 时使用（--notes-file 传入），
+// 供 .github/workflows/release-lxserver.yml 在创建 Release 时使用（--notes-file 传入），
 // 也可以本地预览：`npm run release:notes -- --tag v1.1.2`（不传 --tag 就取当前 HEAD 上的 tag）。
 //
 // 「上一版 tag」按 semver 数值比较取严格小于本次 tag 的最大者，不用 `git tag --sort=creatordate`

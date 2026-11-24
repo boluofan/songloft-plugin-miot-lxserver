@@ -1,5 +1,7 @@
-name: Release Plugin
+name: Release Plugin (lxserver)
 
+# 文件名独立于上游镜像 main 的 release.yml：GitHub 的 Disable workflow 按文件名生效，
+# 这样只需禁用 main 那份，就能停掉镜像分支的构建而不影响本分支的 tag 发版。
 # 发版流程与 mimusic-jsplugin-audiobook 一致：`npm run release` 会改版本、提交、打 tag 并推送；
 # 本工作流只响应 v* tag —— 校验清单版本与 tag 对齐，跑完类型检查/测试/构建/包校验后创建 Release，
 # 最后把 download_url、updateUrl 与包哈希回写到默认分支（lxserver）。分支推送不打包、不发版。

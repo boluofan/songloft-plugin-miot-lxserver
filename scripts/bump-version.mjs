@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // 本地发布入口：算版本 → 改 package.json / plugin.json →
-// 提交 → 打 tag → 推送。推送 tag 后由 .github/workflows/release.yml 构建并创建 Release。
+// 提交 → 打 tag → 推送。推送 tag 后由 .github/workflows/release-lxserver.yml 构建并创建 Release。
 // package-lock.json 不动（本仓库约定不入库；npm ci 也不校验它的 version 字段）。
 //
 // 版本是 semver，与 tag 一致（v1.1.0 ↔ 1.1.0），默认 patch 自增。

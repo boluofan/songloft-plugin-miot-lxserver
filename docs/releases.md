@@ -26,7 +26,7 @@ npm run release -- --version 1.2.0         # 指定版本（重发或补号用�
 
 ## CI 做什么
 
-`.github/workflows/release.yml` 监听 `push: tags: ['v*']`，按顺序：
+`.github/workflows/release-lxserver.yml` 监听 `push: tags: ['v*']`，按顺序：
 
 1. checkout 该 tag；
 2. 校验 `plugin.json.version` 与 tag 一致，不一致立即失败（防止 tag 和清单对不上）；
