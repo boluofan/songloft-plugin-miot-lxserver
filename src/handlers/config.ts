@@ -19,6 +19,7 @@ import { LxServerProvider } from '../lxserver/provider';
 import { OnlineSearcher } from '../voicecmd/online_searcher';
 
 import { normalizeSongMatchThreshold } from '../indexing/song_match';
+import { syncLyricProvider } from './lyric_provider';
 
 const SEARCH_PRIORITIES: SearchPriority[] = [
   'parallel',
@@ -485,6 +486,8 @@ export function registerConfigHandlers(
       }
 
       await configManager.saveConfig(config);
+      // 歌词提供者随内置 lxserver 源开关联动：关源即停止提供歌词。
+      syncLyricProvider(config);
       if (body.hourly_chime_resume_enabled === false) {
         voiceEngine.cancelHourlyResumes();
       }

@@ -2,9 +2,9 @@
 
 The smart speaker player page reads lyrics through the host's `/api/v1/songs/{id}/lyric` endpoint. When a song has no existing lyrics, the host calls registered lyric search plugins and caches successful results in the library. The smart speaker plugin does not need separate lyric provider settings.
 
-This plugin is itself a lyric provider: it registers with the host during initialization. The host then calls the plugin's `/lyric-search` for songs without lyrics. The plugin finds the track by title/artist through the built-in source and normalizes the provider's fields into the host's format (`lyric` / `tlyric` / `rlyric` / `lxlyric`, all LRC text). Hits are cached in the library by the host, so later reads skip the search. Without a configured built-in source the endpoint returns 404 immediately and the host moves on to other providers.
+This plugin is itself a lyric provider, but **lyric support is tied to the built-in lxserver source**: enabling the source registers the plugin with the host, which then calls `/lyric-search` for songs without lyrics. The plugin finds the track by title/artist through the built-in source and normalizes the provider's fields into the host's format (`lyric` / `tlyric` / `rlyric` / `lxlyric`, all LRC text). Hits are cached in the library by the host, so later reads skip the search. Turning the source off unregisters the provider — built-in source songs cannot be searched and this plugin no longer supplies lyrics either; the host asks other providers instead.
 
-1. Enable the built-in lxserver source in this plugin's settings and fill in its address — that is the lyric source; without it the endpoint returns a miss immediately. There is no separate lyric switch.
+1. Enable the built-in lxserver source in this plugin's settings and fill in its address — the lyric provider starts and stops with this switch; there is no separate lyric setting. With it off, built-in source songs cannot be searched and lyrics are no longer supplied by this plugin.
 2. If you do not use the built-in source, install and enable the Lyrics Search plugin instead, then turn on lyric search in its configuration page and save. Enabling the plugin alone does not enable searching.
 3. Play a library song in the smart speaker plugin and click the lyrics button, or swipe left on the mobile fullscreen player.
 

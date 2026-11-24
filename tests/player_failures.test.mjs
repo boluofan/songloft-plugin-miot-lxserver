@@ -3840,6 +3840,7 @@ const { registerConfigHandlers } = loadSource('../src/handlers/config.ts', {
   '../voicecmd/engine': {}, '../memory': { normalizeMemoryMaxRecords: Number },
   // 配置页的「测试搜索」走真实搜索链路，本文件的用例只碰播放/恢复逻辑
   '../voicecmd/online_searcher': { OnlineSearcher: class { } },
+  './lyric_provider': { syncLyricProvider() {}, unregisterLyricProvider() {} },
   '../utils/http': {}, '../utils/debug': {}, '../mina/constants': { DEFAULT_MUSIC_API_MODELS: [] },
 });
 
