@@ -1417,6 +1417,28 @@ export class IndexingManager {
     return songs;
   }
 
+  /**
+   * 取名录命中的规范署名，供歌手口令的播放历史 context_key 使用。
+   * 复用 getArtistNames 的 10 分钟缓存与同一套模糊打分；名录不可用/无命中返回空串，
+   * 由调用方回退到用户口令原文（宁可 key 略偏也别丢历史）。
+   */
+  async resolveArtistCredit(artistName: string): Promise<string> {
+    const queryLower = normalizeForMatch((artistName || '').trim());
+    if (!queryLower) return '';
+    const catalog = await this.getArtistNames();
+    if (!catalog || catalog.names.length === 0) return '';
+    let bestName = '';
+    let bestScore = 49; // 与 resolveArtistSongsFromNames 的命中阈值一致
+    for (let i = 0; i < catalog.norm.length; i++) {
+      const score = fuzzyScoreLower(queryLower, catalog.norm[i]);
+      if (score > bestScore) {
+        bestScore = score;
+        bestName = catalog.names[i];
+      }
+    }
+    return bestName;
+  }
+
   /** `GET /songs?artist=<名>`：服务端精确过滤，一次拿全完整 Song（自带播放地址）。 */
   private async fetchSongsByArtistName(name: string, timeoutMs: number): Promise<any[]> {
     // 索引是经 SDK 的 songs.list 桥接建的，那条桥**不排除**隐藏歌单里的歌；

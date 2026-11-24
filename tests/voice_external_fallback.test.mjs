@@ -106,6 +106,8 @@ function fixture(t, options = {}) {
       const locs = options.artistLocs || [];
       return (options.localSongs || []).filter(s => locs.some(l => l.songId === s.id));
     },
+    // 播放历史的规范署名：夹具不查名录，回退口令原文由生产代码处理
+    resolveArtistCredit: async () => '',
     findSongByName: async () => null,
     findStandaloneSongByName: async () => null,
     findPlaylistByNameWithRefresh: async () => options.playlist || null,
@@ -212,7 +214,7 @@ test('local artist songs keep random playback without external requests', async 
   const f = fixture(t, { artistLocs: [{ playlistId: 7, songId: 9 }], localSongs });
   await execute(f.engine, 'play_artist', '刘德华');
   assert.deepEqual(f.requests, []);
-  assert.deepEqual(f.localPlays, [[localSongs, 0, 'random', '歌手: 刘德华', '刘德华']]);
+  assert.deepEqual(f.localPlays, [[localSongs, 0, 'random', '歌手: 刘德华', '刘德华', undefined, undefined, '刘德华']]);
 });
 
 test('artist songs outside every playlist play locally without external search', async t => {
@@ -224,7 +226,7 @@ test('artist songs outside every playlist play locally without external search',
   });
   const played = await execute(f.engine, 'play_artist', '刘德华');
   assert.deepEqual(f.requests, [], '本地已有该歌手，不该再去在线搜索');
-  assert.deepEqual(f.localPlays, [[localSongs, 0, 'random', '歌手: 刘德华', '刘德华']]);
+  assert.deepEqual(f.localPlays, [[localSongs, 0, 'random', '歌手: 刘德华', '刘德华', undefined, undefined, '刘德华']]);
   assert.deepEqual(played, { songName: '独立导入的歌', artist: '刘德华' });
 });
 

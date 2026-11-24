@@ -43,7 +43,8 @@ const { PlaylistManager } = loadSource('../src/player/manager.ts', {
   '../playback/device_state': loadSource('../src/playback/device_state.ts', {}),
   '../config/manager': { playlistProgressScope: () => 'account:speaker' },
   './url_builder': {},
-  '../utils/http': {},
+  // 播放历史上报走 callHostAPI，fire-and-forget；这些用例不关心上报内容
+  '../utils/http': { callHostAPI: async () => ({}) },
   '../utils/debug': debug,
 });
 

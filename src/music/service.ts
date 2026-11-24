@@ -1344,8 +1344,13 @@ export class MusicCommandService {
 
     const startIndex = Math.floor(Math.random() * fullSongs.length);
 
+    // 播放历史的 context_key 用名录命中的规范署名，与宿主歌手页一致；名录不可用则回退口令原文。
+    // 这一步只查缓存中的名录（命中时通常已在 resolveArtistSongs 里拉过），不额外打宿主接口。
+    const catalogCredit = await this.indexingManager.resolveArtistCredit(cleanArtist);
+    const artistCredit = catalogCredit || cleanArtist;
+
     pm.setAnnounceOnSongChange(true);
-    const ok = await pm.playWithSongs(fullSongs as any, startIndex, 'random', '歌手: ' + cleanArtist, cleanArtist);
+    const ok = await pm.playWithSongs(fullSongs as any, startIndex, 'random', '歌手: ' + cleanArtist, cleanArtist, undefined, undefined, artistCredit);
     if (!ok) {
       songloft.log.error(`[MusicCommandService] play_artist failed for "${cleanArtist}"`);
       return null;

@@ -13,6 +13,17 @@ import { isDebugLog } from '../utils/debug';
 import { ALL_SONGS_PLAYLIST_NAME, isAllSongsPlaylist, loadAllSongs } from './library_playlist';
 import type { PlayState, PlayMode, PlayerStatus, DeviceTargetRef, DeviceGroup } from '../types';
 
+/**
+ * 播放历史上下文（宿主按 (context_type, context_key) 落库）。
+ * - playlist：真歌单，key 是宿主歌单 id
+ * - artist：歌手口令队列，key 是名录命中的规范署名（未命中回退口令原文）
+ * - undefined：「全部歌曲」虚拟歌单 / 无上下文场景，只发事件不落库
+ */
+type PlayHistoryContext = { type: 'playlist' | 'artist'; key: string } | undefined;
+
+/** 宿主不支持 /played 时只探测一次，之后整进程不再发请求。 */
+let playHistoryUnsupported = false;
+
 /** 分配临时歌单唯一负数 ID（每个设备/歌手各一个，互不冲突） */
 let nextTempPlaylistId = -1;
 function allocTempPlaylistId(): number {
@@ -395,6 +406,11 @@ export class PlaylistManager {
   private stopPollResumePosition: number | null = null;
   private stopPollFirstStopAtMs: number = 0;
   private playbackConfirmed: boolean = false;
+  /** 当前播放会话的历史上下文；由 play()/playWithSongs() 赋值，切歌时随 playbackConfirmed 一起重置。 */
+  private playHistoryContext: PlayHistoryContext = undefined;
+  /** 本次起播已上报的歌曲 id（0=未报）。playCurrentInternal 每次起播重置，
+   *  不用 playStartTimeMs 做键：landing 假失败确认发生在锚点赋值之前，且暂停续播不应重复计数。 */
+  private reportedSongId: number = 0;
   private streamStartedAtMs: number = 0;
   private hourlyResumeTask: HourlyResumeTask | null = null;
   private hourlyResumeTimer: any = null;
@@ -623,6 +639,11 @@ export class PlaylistManager {
     this.songs = songs;
     this.totalSongs = songs.length;
     this.playlistId = playlistId;
+    // 真歌单按宿主歌单 id 落库；「全部歌曲」是插件内部虚拟 id，宿主没有对应上下文，
+    // 只带 type=play 发事件让宿主广播，不写历史（避免谁也不查的孤儿数据）。
+    this.playHistoryContext = isAllSongsPlaylist(playlistId)
+      ? undefined
+      : { type: 'playlist', key: String(playlistId) };
     this.tempPlaylistName = '';
     this.tempArtistQuery = '';
     this.pendingTempArtist = '';
@@ -668,7 +689,7 @@ export class PlaylistManager {
    * 用于"播放歌手XX的歌"等场景，将跨歌单收集的歌曲作为虚拟播放列表。
    * @param artistQuery - 歌手搜索词，用于重启后恢复
    */
-  async playWithSongs(songs: Song[], startIndex: number, mode: PlayMode, label?: string, artistQuery?: string, isCurrent?: () => boolean, exactArtist?: boolean): Promise<boolean> {
+  async playWithSongs(songs: Song[], startIndex: number, mode: PlayMode, label?: string, artistQuery?: string, isCurrent?: () => boolean, exactArtist?: boolean, artistCredit?: string): Promise<boolean> {
     if (isCurrent?.() === false) return false;
     this.endExternalPlayback();
     this.stopCheckTimer();
@@ -685,6 +706,10 @@ export class PlaylistManager {
     this.songs = songs;
     this.totalSongs = songs.length;
     this.playlistId = this.tempId;
+    // 只有歌手口令链路带规范署名；不传就只发事件不落库（临时列表没有可查询的宿主上下文）。
+    this.playHistoryContext = artistCredit
+      ? { type: 'artist', key: artistCredit }
+      : undefined;
     this.tempPlaylistName = label || '';
     this.tempArtistQuery = artistQuery !== undefined ? artistQuery : this.tempArtistQuery;
     // 页面在同一临时列表里选曲时不传 artistQuery，保留队列来源与初始顺序。
@@ -1474,8 +1499,46 @@ export class PlaylistManager {
     this.prefetchRequests.delete(songId);
   }
 
+  /**
+   * 确认当前曲目真的在设备发声。四处确认点（假失败核实、landing verify、外停轮询、重载接管）
+   * 都经这里，保证「首次确认」只上一次报。重复调用不影响状态机，只会被去重挡掉。
+   */
+  private markPlaybackConfirmed(songId?: number): void {
+    const song = this.getCurrentSong();
+    if (songId !== undefined && song?.id !== songId) return;
+    const wasConfirmed = this.playbackConfirmed;
+    if (!wasConfirmed) this.playbackConfirmed = true;
+    this.reportSongPlayedOnce(song);
+  }
+
+  /**
+   * 上报一次「本插件确认播放」事件。仅 type=play 且 context_type/context_key 同时非空才落库；
+   * 缺上下文时仍发请求，让宿主广播事件给订阅 onPlayEvent 的插件（虚拟歌单即此形态）。
+   * id<=0（单曲点播/在线临时队列）整条跳过，宿主会 404。
+   * 全程 fire-and-forget + 3s 超时，失败只记日志，不影响投递与后续切歌。
+   */
+  private reportSongPlayedOnce(song: Song | null): void {
+    if (!song || song.id <= 0 || playHistoryUnsupported) return;
+    if (this.reportedSongId === song.id) return;
+    const context = this.playHistoryContext;
+    let path = `/api/v1/songs/${song.id}/played?source=miot&type=play`;
+    if (context) {
+      path += `&context_type=${encodeURIComponent(context.type)}&context_key=${encodeURIComponent(context.key)}`;
+    }
+    this.reportedSongId = song.id;
+    void callHostAPI('POST', path, undefined, { timeoutMs: 3000 }).catch(e => {
+      const message = String(e);
+      if (message.includes('404') || message.includes('405')) {
+        playHistoryUnsupported = true;
+        songloft.log.info('[PlaylistManager] play-history endpoint unsupported (404/405), disabling further reports');
+      } else {
+        songloft.log.info('[PlaylistManager] songPlayed(play) notify failed: ' + message);
+      }
+    });
+  }
+
   private confirmSongPlayback(songId: number): void {
-    if (this.getCurrentSong()?.id === songId) this.playbackConfirmed = true;
+    this.markPlaybackConfirmed(songId);
     this.clearSongFailure(songId);
     this.landingFailedSongs.clear();
   }
@@ -1701,6 +1764,8 @@ export class PlaylistManager {
     this.currentIndex = Math.max(0, songs.findIndex(song => song.id === songId));
     this.playMode = normalizePlayMode(playMode);
     this.playlistId = this.tempId;
+    // 重启恢复的歌手队列沿用持久化下来的署名（已是最接近规范署名的可用值）做历史上下文。
+    this.playHistoryContext = { type: 'artist', key: artistName };
     this.tempPlaylistName = '歌手: ' + artistName;
     this.tempArtistQuery = artistName;
     this.tempArtistExact = exactArtist;
@@ -1871,6 +1936,7 @@ export class PlaylistManager {
     this.resetStreamEvidence();
     this.confirmedTailStream = null;
     this.playbackConfirmed = false;
+    this.reportedSongId = 0;
     this.streamStartedAtMs = 0;
     // 恢复任务的回调只负责任务身份；本地版本负责捕获同曲重播、暂停等操作。
     const generationAtPlay = this.checkTimerGeneration;
@@ -3277,7 +3343,7 @@ export class PlaylistManager {
             this.stopPollMaxPosition = Math.max(this.stopPollMaxPosition, position);
           }
           if (status === 1 && stream !== 'foreign') {
-            this.playbackConfirmed = true;
+            this.markPlaybackConfirmed();
             this.stopPollMisses = 0;
             this.stopPollLastPosition = -1;
             this.stopPollResumePosition = null;
@@ -3287,7 +3353,7 @@ export class PlaylistManager {
             this.stopPollLastPosition = hasPosition && stream !== 'foreign' ? position : -1;
             if (advanced) {
               songloft.log.info(`[PlaylistManager] External stop ignored: status=${status} but position advanced to ${position}s, device still playing`);
-              this.playbackConfirmed = true;
+              this.markPlaybackConfirmed();
               this.stopPollMisses = 0;
               this.stopPollResumePosition = null;
             } else {
@@ -4036,7 +4102,7 @@ export class PlaylistManager {
     }
 
     if (deviceState.status === 1 && this.matchDeviceStream(deviceState) !== 'foreign') {
-      this.playbackConfirmed = true;
+      this.markPlaybackConfirmed();
       // 设备实测位置优先（它才知道缓冲耗了多久）；没上报就用外推值
       const devicePosition = deviceState.position > 0
         ? deviceState.position * this.playbackSpeed + this.streamSeekOffsetSec
