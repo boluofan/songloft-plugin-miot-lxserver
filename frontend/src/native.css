@@ -899,19 +899,33 @@ text {
   font-size: 14px;
 }
 .source-check-grid {
-  flex-direction: row;
-  flex-wrap: wrap;
-  gap: 8px 20px;
+  flex-direction: column;
+  gap: 4px;
   margin: 4px 0;
 }
 .source-check-item {
   flex-direction: row;
   align-items: center;
-  gap: 8px;
-  min-width: 72px;
+  gap: 12px;
+  min-height: 44px;
+  padding: 0 4px;
 }
 .source-check-item text {
   font-size: 14px;
+  flex: 1;
+}
+.source-check-item-off text {
+  color: var(--md-outline);
+}
+.source-move-group {
+  flex-direction: row;
+  align-items: center;
+  gap: 0;
+}
+.source-move-group .sl-button-icon {
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
 }
 .sl-slider {
   width: 100%;

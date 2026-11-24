@@ -59,7 +59,7 @@ Settings → Voice → **Built-in LX Music source (lxserver)**:
 - **User token**: optional (`lx_tk_...`). The plugin resolves the username through `/api/user/auth/verify` and authenticates with a paired `x-user-name` + `x-user-token`; leaving it empty means anonymous access to public sources only.
 - **Default quality**: `320k` (default) / `flac` / `128k`; URL resolution degrades through `flac → 320k → 128k`.
 - **Quality fallback** (on by default): when off, only the selected quality is requested and no lower-quality fallback is attempted.
-- **Sources**: kw / kg / tx / wy / mg, multi-select (at least one required), searched concurrently and ranked/deduplicated by match score.
+- **Sources**: kw / kg / tx / wy / mg, multi-select (at least one required); use the arrows to reorder — the order is the search priority, so when several sources have the same song the earlier one wins. Sources are searched concurrently and ranked/deduplicated by match score.
 - **Search timeout**: 1–30 seconds (default 6); **URL timeout**: 3–60 seconds (default 12).
 - **Online artist queue** (off by default): when the local library has no songs for the requested artist, lxserver fetches a batch of that artist's popular songs and plays the whole queue instead of just the first hit. **Only the `tx` and `wy` sources support artist lookup**; other sources are skipped. If no direct URL can be resolved it falls back to the previous "play only the top-1 track" behaviour. The queue is temporary (nothing is imported), and only the first 2 tracks are resolved before playback starts — the rest are resolved just before they are needed, so a 10-track queue does not delay first playback by several seconds.
 

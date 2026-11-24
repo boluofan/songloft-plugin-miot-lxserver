@@ -777,10 +777,23 @@ const pageState = {
       void saveConfig({ lxserver: { ...state.config.lxserver, ...patch } });
     }
     const lxSourceOrder = ['kw', 'kg', 'tx', 'wy', 'mg'];
-    function toggleLxSource(source: string, enabled: boolean): void {
-      const current = Array.isArray(state.config.lxserver.sources)
-        ? [...state.config.lxserver.sources]
+    /** 已启用音源，保持配置里的顺序（即搜索优先级），去重并过滤非法值。 */
+    function enabledLxSources(): string[] {
+      const raw = Array.isArray(state.config.lxserver.sources)
+        ? state.config.lxserver.sources
         : [];
+      return [...new Set(raw)].filter((s) => lxSourceOrder.includes(s));
+    }
+    // 展示顺序 = 已启用源（配置顺序）在前，未启用源按默认顺序在后。
+    const lxSourcesDisplay = computed<string[]>(() => {
+      const enabled = enabledLxSources();
+      return [
+        ...enabled,
+        ...lxSourceOrder.filter((s) => !enabled.includes(s)),
+      ];
+    });
+    function toggleLxSource(source: string, enabled: boolean): void {
+      const current = enabledLxSources();
       const next = enabled
         ? [...current, source]
         : current.filter((s) => s !== source);
@@ -788,10 +801,17 @@ const pageState = {
         notify('至少保留一个搜索音源', 'error');
         return;
       }
-      const deduped = [...new Set(next)];
-      saveLxserver({
-        sources: lxSourceOrder.filter((s) => deduped.includes(s)),
-      });
+      saveLxserver({ sources: next });
+    }
+    /** 交换某音源与相邻的已启用音源，调整搜索优先级（未启用项不参与）。 */
+    function moveLxSource(source: string, delta: -1 | 1): void {
+      const current = enabledLxSources();
+      const from = current.indexOf(source);
+      const to = from + delta;
+      if (from < 0 || to < 0 || to >= current.length) return;
+      const next = [...current];
+      [next[from], next[to]] = [next[to], next[from]];
+      saveLxserver({ sources: next });
     }
     function saveLxNumber(
       key: 'searchTimeout' | 'urlTimeout',
@@ -883,7 +903,9 @@ const pageState = {
       lxSearchTimeout,
       lxUrlTimeout,
       lxSourceOrder,
+      lxSourcesDisplay,
       toggleLxSource,
+      moveLxSource,
       saveLxNumber,
       webhookName,
       webhookUrl,
@@ -2049,26 +2071,56 @@ export default function VoiceSettings(props: any) {
             <NativeView className="field">
               <NativeView className="field-label"><text>搜索音源</text></NativeView>
               <NativeView className="source-check-grid">
-                {vm.lxSourceOrder.map((source: string) => (
-                  <NativeView
-                    key={source}
-                    className="source-check-item"
-                  >
-                    <SlCheckbox
-                      modelValue={vm.state.config.lxserver.sources.includes(
-                        source,
-                      )}
-                      onUpdateModelValue={(checked: any) => {
-                        vm.toggleLxSource(source, !!checked);
-                      }}
-                    ></SlCheckbox>
-                    <text>{source}</text>
-                  </NativeView>
-                ))}
+                {vm.lxSourcesDisplay.map((source: string) => {
+                  const enabled = vm.state.config.lxserver.sources.includes(
+                    source,
+                  );
+                  const enabledCount = vm.state.config.lxserver.sources.length;
+                  const activeIndex = enabled
+                    ? vm.state.config.lxserver.sources.indexOf(source)
+                    : -1;
+                  return (
+                    <NativeView
+                      key={source}
+                      className={classes([
+                        'source-check-item',
+                        !enabled && 'source-check-item-off',
+                      ])}
+                    >
+                      <SlCheckbox
+                        modelValue={enabled}
+                        onUpdateModelValue={(checked: any) => {
+                          vm.toggleLxSource(source, !!checked);
+                        }}
+                      ></SlCheckbox>
+                      <text>{source}</text>
+                      {enabled ? (
+                        <NativeView className="source-move-group">
+                          <SlButton
+                            icon="arrow_upward"
+                            aria-label={`上移 ${source}`}
+                            disabled={activeIndex <= 0}
+                            onClick={() => {
+                              vm.moveLxSource(source, -1);
+                            }}
+                          ></SlButton>
+                          <SlButton
+                            icon="arrow_downward"
+                            aria-label={`下移 ${source}`}
+                            disabled={activeIndex >= enabledCount - 1}
+                            onClick={() => {
+                              vm.moveLxSource(source, 1);
+                            }}
+                          ></SlButton>
+                        </NativeView>
+                      ) : null}
+                    </NativeView>
+                  );
+                })}
               </NativeView>
               <NativeView className="field-help">
                 <text>
-                  可多选，至少保留一个。选中的音源并发搜索，按顺序去重；歌手在线检索仅 tx / wy 支持。
+                  可多选，至少保留一个。顺序即搜索优先级：同一首歌多个音源都有时，靠前的优先；用箭头调整。歌手在线检索仅 tx / wy 支持。
                 </text>
               </NativeView>
             </NativeView>

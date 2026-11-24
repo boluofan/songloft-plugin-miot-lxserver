@@ -99,7 +99,7 @@ function voiceHarness(overrides = {}) {
   const source = readSetup('views/settings/VoiceSettings.tsx');
   const js = transpile(
     source,
-    'lxSearchTimeout,lxUrlTimeout,toggleLxSource,saveLxNumber,saveLxserver',
+    'lxSearchTimeout,lxUrlTimeout,lxSourcesDisplay,toggleLxSource,moveLxSource,saveLxNumber,saveLxserver',
   );
   const page = new Function(...Object.keys(env), js)(...Object.values(env));
   return { ...page, state, calls, notifications, watchers };
@@ -148,29 +148,52 @@ function playbackHarness() {
   return { ...page, state, calls, saveConfig: env.saveConfig };
 }
 
-test('搜索音源多选：去重、按固定顺序保存、至少保留一个', () => {
+test('搜索音源多选：勾选追加到末尾、取消移除、至少保留一个', () => {
   const h = voiceHarness({ lxserver: { sources: ['kg', 'tx'] } });
   h.toggleLxSource('kw', true);
-  assert.deepEqual(h.state.config.lxserver.sources, ['kw', 'kg', 'tx']);
+  assert.deepEqual(h.state.config.lxserver.sources, ['kg', 'tx', 'kw']);
   h.toggleLxSource('tx', false);
-  assert.deepEqual(h.state.config.lxserver.sources, ['kw', 'kg']);
+  assert.deepEqual(h.state.config.lxserver.sources, ['kg', 'kw']);
 
   // 取消最后一个被拒绝，并给出提示
-  h.toggleLxSource('kw', false);
-  assert.deepEqual(h.state.config.lxserver.sources, ['kg']);
-  const before = [...h.state.config.lxserver.sources];
-  const callsBefore = h.calls.length;
   h.toggleLxSource('kg', false);
-  assert.deepEqual(h.state.config.lxserver.sources, before);
+  assert.deepEqual(h.state.config.lxserver.sources, ['kw']);
+  const callsBefore = h.calls.length;
+  h.toggleLxSource('kw', false);
+  assert.deepEqual(h.state.config.lxserver.sources, ['kw']);
   assert.equal(h.calls.length, callsBefore);
   assert.ok(h.notifications.some(([text]) => text.includes('至少保留一个')));
 });
 
-test('搜索音源多选：源列表为空时点击任一源得到单元素合法数组', () => {
-  const h = voiceHarness({ lxserver: { sources: [] } });
-  h.toggleLxSource('wy', true);
-  assert.deepEqual(h.state.config.lxserver.sources, ['wy']);
+test('搜索音源多选：展示顺序为已启用（配置顺序）在前、未启用在后', () => {
+  const h = voiceHarness({ lxserver: { sources: ['tx', 'kw'] } });
+  assert.deepEqual(h.lxSourcesDisplay.value, [
+    'tx',
+    'kw',
+    'kg',
+    'wy',
+    'mg',
+  ]);
 });
+
+test('搜索音源排序：上下移只交换已启用音源，边界不动', () => {
+  const h = voiceHarness({ lxserver: { sources: ['kw', 'kg', 'tx'] } });
+  h.moveLxSource('tx', -1);
+  assert.deepEqual(h.state.config.lxserver.sources, ['kw', 'tx', 'kg']);
+  h.moveLxSource('kw', 1);
+  assert.deepEqual(h.state.config.lxserver.sources, ['tx', 'kw', 'kg']);
+  // 已经是第一个，上移无效
+  const before = [...h.state.config.lxserver.sources];
+  const callsBefore = h.calls.length;
+  h.moveLxSource('tx', -1);
+  h.moveLxSource('kg', 1);
+  assert.deepEqual(h.state.config.lxserver.sources, before);
+  assert.equal(h.calls.length, callsBefore);
+  // 未启用的音源不参与排序
+  h.moveLxSource('wy', 1);
+  assert.deepEqual(h.state.config.lxserver.sources, before);
+});
+
 
 test('lxserver 超时输入按各自边界钳制后写入 lxserver 子对象', () => {
   const h = voiceHarness();
