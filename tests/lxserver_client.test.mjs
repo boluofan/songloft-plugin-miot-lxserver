@@ -172,6 +172,47 @@ test('直链解析必须回传完整 songInfo（含 hash）', async t => {
   assert.equal(body.quality, '320k');
 });
 
+test('残缺直链（裸域名）自动换源重试，直到拿到可用直链', async t => {
+  const requests = setupFetch(t, (url, init) => {
+    if (url.includes('/api/music/url')) {
+      const body = JSON.parse(init.body);
+      const tried = body.excludeApiSources || [];
+      assert.equal(body.enableAutoSwitchApiSource, true, '开启音源自动切换');
+      if (tried.length === 0) {
+        return jsonResp({ url: 'https://aqqmusic.tc.qq.com/', type: '320k', sourceName: '坏源A', hasMoreSources: true });
+      }
+      if (tried.length === 1) {
+        return jsonResp({ url: 'http://wx.music.tc.qq.com/&redirect=1', type: '320k', sourceName: '坏源B', hasMoreSources: true });
+      }
+      return jsonResp({ url: 'http://106.0.55.102/2026-11-22-150024.mp3', type: '320k', sourceName: '好源C', hasMoreSources: false });
+    }
+    return jsonResp([]);
+  });
+  const client = new LxServerClient(config());
+  const playable = await client.musicUrl(songInfo(), '320k');
+  assert.equal(playable.url, 'http://106.0.55.102/2026-11-22-150024.mp3');
+  assert.equal(playable.sourceName, '好源C');
+  const bodies = requests.filter(r => r.url.includes('/api/music/url')).map(r => JSON.parse(r.init.body));
+  assert.equal(bodies.length, 3, '三次解析：两个坏源 + 一个好源');
+  assert.deepEqual(bodies.map(b => b.excludeApiSources), [[], ['坏源A'], ['坏源A', '坏源B']], '累积排除已试过的坏源');
+  assert.ok(bodies.every(b => b.songInfo.songmid === '228908'), '每轮都回传完整 songInfo');
+});
+
+test('残缺直链但 hasMoreSources=false 时抛出，不无限重试', async t => {
+  const requests = setupFetch(t, () => jsonResp({ url: 'https://aqqmusic.tc.qq.com/', type: '320k', sourceName: '坏源A', hasMoreSources: false }));
+  const client = new LxServerClient(config());
+  await assert.rejects(() => client.musicUrl(songInfo(), '320k'), /残缺直链/);
+  assert.equal(requests.filter(r => r.url.includes('/api/music/url')).length, 1);
+});
+
+test('正常直链不触发额外换源请求', async t => {
+  const requests = setupFetch(t, () => jsonResp({ url: 'https://audio.test/song.mp3', type: '320k' }));
+  const client = new LxServerClient(config());
+  const playable = await client.musicUrl(songInfo(), '320k');
+  assert.equal(playable.url, 'https://audio.test/song.mp3');
+  assert.equal(requests.length, 1);
+});
+
 test('多源聚合失败隔离：坏源不影响好源，按 sources 顺序返回', async t => {
   setupFetch(t, (url) => {
     if (url.includes('source=bad')) return jsonResp({ error: 'bad source' });

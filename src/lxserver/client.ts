@@ -391,20 +391,71 @@ export class LxServerClient {
     return out;
   }
 
-  /** 播放直链：songInfo 必须是 search 原样返回的完整对象（缺 hash/songmid/songId 会全源解析失败） */
+  /**
+   * 直链可用性：音源会"解析成功"却返回残缺 URL（如只有域名的 `https://aqqmusic.tc.qq.com/`
+   * 或 `http://host/&redirect=1`）。这种 URL 经转码代理会被 ffmpeg 403，设备落地失败。
+   * 只做结构校验（不发网络请求）：必须有 http(s) 协议 + 非空路径 + 路径里含音频文件名/标识。
+   */
+  private static isUsableDirectUrl(url: unknown): url is string {
+    if (typeof url !== 'string' || !url) return false;
+    let parsed: URL;
+    try { parsed = new URL(url); } catch { return false; }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    const path = parsed.pathname.replace(/\/+$/, '');
+    if (!path || path === '/') return false;
+    // 合法直链路径里带音频文件名（.mp3/.m4a/.flac 等）或媒体标识段；
+    // 残缺形态（`/`、`/&redirect=1`）没有这样的段。
+    return /\.[a-z0-9]{2,5}$/i.test(path) || path.split('/').some(seg => /^[A-Za-z0-9_-]{8,}$/.test(seg));
+  }
+
+  /**
+   * 播放直链：songInfo 必须是 search 原样返回的完整对象（缺 hash/songmid/songId 会全源解析失败）。
+   * 音源返回残缺直链且 `hasMoreSources` 为真时，带 excludeApiSources 排除坏源重试，
+   * 直到拿到可用直链或没有更多源（对齐 lxserver 前端的换源契约）。
+   */
   async musicUrl(
     songInfo: Record<string, unknown>,
     quality: LXQuality,
     timeoutMs = this.cfg.urlTimeout * 1000,
   ): Promise<LXPlayableUrl> {
-    const body = JSON.stringify({ songInfo, quality });
-    const r = await this.reqJSON<{ url?: string; type?: string; sourceName?: string; error?: string }>(
-      '/api/music/url',
-      { method: 'POST', body },
-      timeoutMs,
-    );
-    if (!r || !r.url) throw new LxError(this.withAuthHint(r?.error || '解析失败:无 url'));
-    return { url: r.url, type: String(r.type ?? quality), sourceName: r.sourceName };
+    const deadline = Date.now() + timeoutMs;
+    const excluded: string[] = [];
+    let lastProblem = '解析失败:无 url';
+
+    // 上限防御：单平台自定义源数量有限，避免异常响应（如源名重复但 hasMoreSources 恒为真）
+    // 导致无限重试；真正约束仍是上面的 deadline 预算。
+    const MAX_SOURCE_SWITCHES = 12;
+    for (let attempt = 0; attempt < MAX_SOURCE_SWITCHES; attempt++) {
+      if (Date.now() >= deadline) throw new LxError('直链解析预算已耗尽');
+      const body = JSON.stringify({
+        songInfo,
+        quality,
+        enableAutoSwitchApiSource: true,
+        excludeApiSources: excluded,
+      });
+      const remaining = Math.max(1000, Math.min(timeoutMs, deadline - Date.now()));
+      const r = await this.reqJSON<{
+        url?: string; type?: string; sourceName?: string; sourceId?: string;
+        error?: string; hasMoreSources?: boolean;
+      }>('/api/music/url', { method: 'POST', body }, remaining);
+
+      if (r?.url && LxServerClient.isUsableDirectUrl(r.url)) {
+        return { url: r.url, type: String(r.type ?? quality), sourceName: r.sourceName };
+      }
+
+      // 好链直接返回；坏链则记住来源，若服务端还有别的源就排除后重试。
+      const badSource = r?.sourceName || r?.sourceId;
+      lastProblem = r?.url ? `音源返回残缺直链: ${r.url}` : this.withAuthHint(r?.error || '解析失败:无 url');
+      if (!r?.hasMoreSources || !badSource || excluded.includes(badSource)) {
+        // 已经把当前源排除过仍拿到同一坏链，或明确没有更多源 —— 停止重试避免死循环。
+        if (r?.url && !LxServerClient.isUsableDirectUrl(r.url) && badSource && !excluded.includes(badSource)) {
+          excluded.push(badSource);
+        }
+        break;
+      }
+      excluded.push(badSource);
+    }
+    throw new LxError(lastProblem);
   }
 
   /**
