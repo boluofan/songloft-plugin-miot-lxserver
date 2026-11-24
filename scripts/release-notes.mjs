@@ -67,6 +67,18 @@ export function parseCommitSubject(subject) {
   };
 }
 
+// 从 git 的 author 字段挑一个适合放在 @ 后面的标识。GitHub 的 noreply 邮箱
+// （<id>+<username>@users.noreply.github.com）里能取出真正的 username —— Release
+// 正文里的 @username GitHub 会自动链到用户主页；普通邮箱退回 author name。
+export function authorHandle(name, email) {
+  const noreply = /^(?:\d+\+)?([A-Za-z0-9][A-Za-z0-9-]*)@users\.noreply\.github\.com$/i
+    .exec(String(email ?? '').trim());
+  if (noreply) return noreply[1];
+  const trimmedName = String(name ?? '').trim();
+  if (trimmedName) return trimmedName;
+  return String(email ?? '').split('@')[0] || 'unknown';
+}
+
 /**
  * 选「上一版 tag」：所有合法 semver tag 里严格小于 currentTag 的最大者。
  * 返回 null 表示这是首个版本，调用方应回退到仓库首个提交。
@@ -96,6 +108,7 @@ export function groupCommits(entries) {
     if (!buckets.has(key)) buckets.set(key, []);
     buckets.get(key).push({
       hash: entry.hash,
+      author: String(entry.author ?? '').trim(),
       scope: parsed?.scope ?? '',
       description: parsed?.description ?? String(entry.subject ?? '').trim(),
       breaking: !!parsed?.breaking,
@@ -113,7 +126,7 @@ const commitLink = (hash, repository) =>
 
 /**
  * 渲染成 Release 正文。
- * @param {{tag: string, previousTag: string|null, commits: {hash: string, subject: string}[], repository?: string}} input
+ * @param {{tag: string, previousTag: string|null, commits: {hash: string, subject: string, author?: string}[], repository?: string}} input
  */
 export function renderReleaseNotes({ tag, previousTag, commits, repository = '' }) {
   const lines = ['## 更新内容', ''];
@@ -126,7 +139,8 @@ export function renderReleaseNotes({ tag, previousTag, commits, repository = '' 
       lines.push(`### ${group.label}`, '');
       for (const item of group.items) {
         const prefix = item.scope ? `\`${item.scope}\`: ` : '';
-        lines.push(`- ${prefix}${item.description} (${commitLink(item.hash, repository)})`);
+        const by = item.author ? ` (commit by @${item.author})` : '';
+        lines.push(`- ${prefix}${item.description} (${commitLink(item.hash, repository)})${by}`);
       }
       lines.push('');
     }
@@ -177,15 +191,19 @@ function main() {
   // 首个版本没有上一个 tag：用仓库首个提交，让 notes 覆盖全部历史。
   const base = previousTag || git('rev-list', '--max-parents=0', 'HEAD').split('\n').filter(Boolean).pop();
 
-  const raw = git('log', '--no-merges', '--pretty=format:%h%x09%s', `${base}..${tag}`);
+  // 取 hash / author name / author email / subject，tab 分隔；subject 放最后，
+  // 里面万一有 tab 也能靠 join 还原。
+  const raw = git('log', '--no-merges', '--pretty=format:%h%x09%an%x09%ae%x09%s', `${base}..${tag}`);
   const commits = raw
     .split('\n')
     .filter(Boolean)
     .map(line => {
-      const index = line.indexOf('\t');
-      return index < 0
-        ? { hash: line.trim(), subject: '' }
-        : { hash: line.slice(0, index).trim(), subject: line.slice(index + 1) };
+      const [hash, name, email, ...subjectParts] = line.split('\t');
+      return {
+        hash: (hash ?? '').trim(),
+        author: authorHandle(name, email),
+        subject: subjectParts.join('\t'),
+      };
     });
 
   const notes = renderReleaseNotes({ tag, previousTag: from ?? previousTag, commits, repository });

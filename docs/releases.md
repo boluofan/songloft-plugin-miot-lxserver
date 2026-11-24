@@ -47,11 +47,11 @@ npm run release -- --version 1.2.0         # 指定版本（重发或补号用�
 
 ### ✨ 新功能
 
-- `voice`: 加口令 ([ccc3333](https://github.com/…/commit/ccc3333))
+- `voice`: 加口令 ([ccc3333](https://github.com/…/commit/ccc3333)) (commit by @boluofan)
 
 ### 🐛 修复
 
-- `search`: 入库模式允许播放时解析外部音源 ([6e89a24](https://github.com/…/commit/6e89a24))
+- `search`: 入库模式允许播放时解析外部音源 ([6e89a24](https://github.com/…/commit/6e89a24)) (commit by @hanxi)
 
 ---
 
@@ -61,6 +61,7 @@ npm run release -- --version 1.2.0         # 指定版本（重发或补号用�
 规则：
 
 - 分组顺序固定：💥 不兼容变更 → ✨ 新功能 → 🐛 修复 → ⚡ 性能 → ♻️ 重构 → 📝 文档 → 📦 构建 → 🤖 持续集成 → ✅ 测试 → 🎨 代码风格 → 🔧 杂项 → ⏪ 回滚 → 📌 其他。组内按提交时间倒序。
+- 每条提交末尾带 `(commit by @作者)`：优先从 GitHub noreply 邮箱里取 username（正文里的 `@username` 会被 GitHub 自动链到主页），普通邮箱退回提交里的 author name；没有作者信息的旧数据不显示这一段。
 - `chore(release)` 不列出：改的只是版本号，而且它自己就在被发布的这批提交里。
 - 类型不在表内的提交（如 `wip:`）落到「其他」，不会被丢掉；不符合 `type(scope): 描述` 格式的同样归到「其他」。
 - 「上一版 tag」按 **semver 数值**取严格小于本次的最大者，不用 `git tag --sort=creatordate` 取末尾——手动补发某个旧 tag 时，时间序会取到比它新的 tag，changelog 范围就反了。

@@ -47,11 +47,11 @@ Step 6 does not use GitHub's auto-generated "What's Changed". `scripts/release-n
 
 ### ✨ 新功能
 
-- `voice`: 加口令 ([ccc3333](https://github.com/…/commit/ccc3333))
+- `voice`: 加口令 ([ccc3333](https://github.com/…/commit/ccc3333)) (commit by @boluofan)
 
 ### 🐛 修复
 
-- `search`: 入库模式允许播放时解析外部音源 ([6e89a24](https://github.com/…/commit/6e89a24))
+- `search`: 入库模式允许播放时解析外部音源 ([6e89a24](https://github.com/…/commit/6e89a24)) (commit by @hanxi)
 
 ---
 
@@ -61,6 +61,7 @@ Step 6 does not use GitHub's auto-generated "What's Changed". `scripts/release-n
 Rules:
 
 - Fixed section order: 💥 breaking → ✨ features → 🐛 fixes → ⚡ performance → ♻️ refactor → 📝 docs → 📦 build → 🤖 CI → ✅ tests → 🎨 style → 🔧 chore → ⏪ revert → 📌 other. Newest commit first within a section.
+- Every entry ends with `(commit by @author)`: a GitHub username is extracted from noreply emails (GitHub auto-links `@username` in the notes), falling back to the commit author name for other addresses. Entries without author data omit this suffix.
 - `chore(release)` is omitted: it only touches version numbers and is itself part of the batch being published.
 - Unrecognised types (e.g. `wip:`) and subjects that do not match `type(scope): description` land in "other" rather than being dropped.
 - "Previous tag" is the greatest semver tag **numerically lower** than the current one — not the last entry of `git tag --sort=creatordate`, which would pick a newer tag when republishing an older one and reverse the changelog range.

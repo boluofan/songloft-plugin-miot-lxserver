@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  authorHandle,
   groupCommits,
   parseCommitSubject,
   renderReleaseNotes,
@@ -17,6 +18,13 @@ test('解析约定式提交标题：类型、作用域、破坏性标记', () =>
   assert.equal(parseCommitSubject('随手改一下'), null, '不符合约定返回 null');
   assert.equal(parseCommitSubject(''), null);
   assert.equal(parseCommitSubject(undefined), null);
+});
+
+test('作者标识优先取 GitHub noreply 邮箱里的 username，其次退回 author name', () => {
+  assert.equal(authorHandle('菠萝饭', '40459801+boluofan@users.noreply.github.com'), 'boluofan');
+  assert.equal(authorHandle('涵曦', 'im.hanxi@gmail.com'), '涵曦', '普通邮箱用 author name');
+  assert.equal(authorHandle('github-actions[bot]', 'github-actions[bot]@users.noreply.github.com'), 'github-actions[bot]');
+  assert.equal(authorHandle('', ''), 'unknown', '啥都没有也要有个占位');
 });
 
 test('类型不在约定表里也算有效提交，落到「其他」而不是丢掉', () => {
@@ -47,6 +55,15 @@ test('发版提交不进更新列表，它自己就在被发布的这批提交�
   assert.deepEqual(items, ['fff6666', 'ggg7777'], '只保留非发版提交，其他 chore 照常列出');
 });
 
+test('分组条目保留作者，供渲染时标注 commit by', () => {
+  const groups = groupCommits([
+    { hash: 'abc1234', author: 'boluofan', subject: 'fix: 修东西' },
+    { hash: 'def5678', subject: 'fix: 没作者的旧数据' },
+  ]);
+  assert.equal(groups[0].items[0].author, 'boluofan');
+  assert.equal(groups[0].items[1].author, '', '缺字段也不炸');
+});
+
 test('破坏性变更单独置顶，同时保留它原本的类型归属信息', () => {
   const groups = groupCommits([
     { hash: 'aaa1111', subject: 'feat(api): 新接口' },
@@ -73,13 +90,15 @@ test('渲染出中文分组、作用域与提交链接', () => {
     previousTag: 'v1.1.1',
     repository: 'boluofan/songloft-plugin-miot-plus',
     commits: [
-      { hash: 'ccc3333', subject: 'feat(voice): 加口令' },
-      { hash: 'bbb2222', subject: 'fix(player): 修切歌' },
+      { hash: 'ccc3333', author: 'boluofan', subject: 'feat(voice): 加口令' },
+      { hash: 'bbb2222', author: 'hanxi', subject: 'fix(player): 修切歌' },
     ],
   });
   assert.match(notes, /^## 更新内容/);
   assert.match(notes, /### ✨ 新功能\n\n- `voice`: 加口令 \(\[ccc3333\]\(https:\/\/github\.com\/boluofan\/songloft-plugin-miot-plus\/commit\/ccc3333\)\)/);
   assert.match(notes, /### 🐛 修复/);
+  assert.match(notes, /\(commit by @boluofan\)/);
+  assert.match(notes, /\(commit by @hanxi\)/);
   assert.match(notes, /完整对比.*v1\.1\.1\.\.\.v1\.1\.2/);
   assert.ok(notes.endsWith('\n'), '以换行结尾，--notes-file 读进去才不粘连');
 });
@@ -91,6 +110,7 @@ test('没有仓库信息时退化为纯哈希，没有上一版时不渲染对�
     commits: [{ hash: 'abc1234', subject: 'feat: 首个版本' }],
   });
   assert.match(notes, /- 首个版本 \(abc1234\)/);
+  assert.doesNotMatch(notes, /commit by/, '旧数据没作者时不硬凑 @unknown');
   assert.doesNotMatch(notes, /完整对比/);
 });
 
