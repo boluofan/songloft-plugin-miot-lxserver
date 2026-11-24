@@ -1872,7 +1872,7 @@ export default function VoiceSettings(props: any) {
                   }}
                 ></SlSwitch>
                 <NativeView className="field-help">
-                  <text>关闭（默认）：命中以「引用」入库——只存怎么取到这首歌（内置源存平台与曲目标识，外部源存源/关键词/曲名提示），直链在播放时现解析，曲库条目不会因签名过期而失效，可收藏可重播。开启：仅对直链生效，不入库、直接把链接推给音箱，适合会过期的临时链接，但不适合追加歌单；此时直链缓存 5 分钟过期，过期后临播自动重解析。</text>
+                  <text>关闭（默认）：命中以「引用」入库——只存怎么取到这首歌，可收藏可重播。开启：仅对直链生效，不入库、直接把链接推给音箱。</text>
                 </NativeView>
               </NativeView>
             </NativeView>
