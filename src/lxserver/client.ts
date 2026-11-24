@@ -260,6 +260,19 @@ export class LxServerClient {
     return list.map((item) => this.toTrack(item));
   }
 
+  /**
+   * 歌词：POST /api/music/lyric。songInfo 必须是 search 原样返回的完整对象——
+   * 各平台要的 ID 字段名不同（kg 要 hash、mg 要 copyrightId、wy 要 songmid），
+   * 只传内部LXTrack.id 会拿不到歌词。
+   */
+  async getLyric(songInfo: Record<string, unknown>): Promise<unknown> {
+    return this.reqJSON<unknown>(
+      '/api/music/lyric',
+      { method: 'POST', body: JSON.stringify({ songInfo }) },
+      this.cfg.urlTimeout * 1000,
+    );
+  }
+
   /** 歌手搜索：GET /api/music/search?type=singer。仅 tx/wy 支持，其他源由 lxserver 返回 500。 */
   async searchSingers(source: string, name: string, limit = 10): Promise<LXArtist[]> {
     const q = new URLSearchParams({ name, source, type: 'singer', page: '1', limit: String(limit) });

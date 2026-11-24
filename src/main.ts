@@ -268,7 +268,14 @@ async function onInit(): Promise<void> {
   );
   registerIndexingHandlers(router, indexingManager);
   registerMemoryHandlers(router, memoryService, configManager);
-  registerLyricHandlers(router);
+  registerLyricHandlers(router, configManager);
+  // 本插件作为歌词提供者：宿主对无歌词歌曲回调 /lyric-search，命中后由宿主自动入库。
+  // 未配置内置源时端点快速返回空，宿主会跳过，不会污染搜索结果。
+  try {
+    songloft.lyrics.registerProvider();
+  } catch (e) {
+    songloft.log.warn('注册歌词提供者失败: ' + String(e));
+  }
   // 解析型音源：宿主播放本插件入库的歌曲时回调 /music/url 现取直链
   registerMusicSourceHandlers(router, configManager);
   registerGroupHandlers(router, configManager, playlistManagerMap);
@@ -327,6 +334,12 @@ async function onInit(): Promise<void> {
 
 async function onDeinit(): Promise<void> {
   songloft.log.info('MIoT 智能音箱插件停止...');
+  // 宿主侧仍记着本插件是歌词提供者，卸载前摘掉，避免继续回调已不存在的路由。
+  try {
+    songloft.lyrics.unregisterProvider();
+  } catch (e) {
+    songloft.log.warn('取消注册歌词提供者失败: ' + String(e));
+  }
   voiceDispatcher?.close();
   aiChat?.close();
   voiceEngine?.close();

@@ -8,6 +8,8 @@ import { LxServerClient } from './client';
 import type { LXArtist, LXPlayableUrl, LXServerConfig, LXTrack } from './types';
 import type { LXSongRef } from './ref';
 import { buildSongRef } from './ref';
+import { normalizeLyric } from './lyric';
+import type { LyricPayload } from './lyric';
 import type { OnlineSearchResult } from '../voicecmd/online_searcher';
 
 /** 与 online_searcher 的 hint 对齐 */
@@ -185,6 +187,39 @@ export class LxServerProvider {
     this.lastMissReason = 'no_playable_url';
     songloft.log.warn('[LxServerProvider] no playable url for: ' + clean);
     return null;
+  }
+
+  /**
+   * 歌词用候选搜索：只搜索 + 打分排序，不解析直链。
+   * 歌词是独立的文本资源；直链解析失败（音源临时 404）不该让歌词也拿不到。
+   */
+  async findTracksForLyric(keyword: string, hint: LXSearchHint | null): Promise<LXTrack[]> {
+    if (!this.isConfigured()) return [];
+    const clean = keyword.replace(/\s+/g, ' ').trim();
+    if (!clean) return [];
+    let tracks: LXTrack[];
+    try {
+      tracks = await this.client.searchAggregate(clean);
+      if (tracks.length === 0 && hint?.title && normalizeText(hint.title) !== normalizeText(clean)) {
+        tracks = await this.client.searchAggregate(hint.title);
+      }
+    } catch (e) {
+      songloft.log.warn('[LxServerProvider] lyric candidate search failed: ' + String(e));
+      return [];
+    }
+    const threshold = hint ? 40 : 0;
+    return tracks
+      .map((track) => ({ track, score: matchScore(track, hint) }))
+      .filter((r) => r.score >= threshold)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5)
+      .map((r) => r.track);
+  }
+
+  /** 取歌词并归一化成宿主 LyricPayload；全空表示没找到 */
+  async getTrackLyric(track: LXTrack): Promise<LyricPayload> {
+    const raw = await this.client.getLyric(track.raw);
+    return normalizeLyric(raw);
   }
 
   /**
