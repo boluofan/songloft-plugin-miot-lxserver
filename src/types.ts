@@ -339,6 +339,8 @@ export interface AIAnalysisResult {
     artist?: string;
     /** play_chart：榜单名（热歌榜/飙升榜等） */
     chart?: string;
+    /** play_chart：指定音源别名（kw/kg/tx/wy/mg），用户点名平台时填写 */
+    source?: string;
     playlist?: string;
     mode?: string;
     volume?: number;

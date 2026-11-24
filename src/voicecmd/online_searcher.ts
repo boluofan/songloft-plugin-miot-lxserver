@@ -531,7 +531,7 @@ export class OnlineSearcher {
    */
   async searchChartQueue(
     chartName: string,
-    opts?: { limit?: number; preResolve?: number; importMode?: boolean },
+    opts?: { limit?: number; preResolve?: number; importMode?: boolean; source?: string },
   ): Promise<OnlineArtistQueue | null> {
     const name = (chartName || '').replace(/\s+/g, ' ').trim();
     if (!name) return null;
@@ -544,7 +544,7 @@ export class OnlineSearcher {
     const preResolve = importMode ? 0 : Math.max(1, Math.min(limit, opts?.preResolve ?? 2));
     let queue: LXChartQueue | null;
     try {
-      queue = await provider.chartQueue(name, limit, preResolve);
+      queue = await provider.chartQueue(name, limit, preResolve, opts?.source);
     } catch (e) {
       songloft.log.warn('[OnlineSearcher] lxserver chart queue error: ' + String(e));
       return null;

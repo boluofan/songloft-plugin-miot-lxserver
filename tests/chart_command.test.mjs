@@ -114,12 +114,83 @@ test('「播放热歌榜」匹配为 play_chart 命令且榜单名提取正确',
   assert.equal(rule.argument, '', '关键词本身含榜名');
 });
 
+test('平台全称前缀：口令命中 play_chart，参数只留榜名', async t => {
+  const h = fixture(t);
+  const { rule } = await runQuery(h, '播放QQ音乐热搜榜');
+  assert.ok(rule);
+  assert.equal(rule.command.type, 'play_chart');
+  assert.equal(rule.keyword, '播放QQ音乐');
+  assert.equal(rule.argument, '热搜榜');
+});
+
+test('泛请求「播放QQ音乐的歌」不会被平台前缀关键词吃成榜单', async t => {
+  const h = fixture(t);
+  const { rule } = await runQuery(h, '播放QQ音乐的歌');
+  assert.notEqual(rule?.command.type, 'play_chart');
+});
+
+test('平台全称前缀只拉该平台目录', async t => {
+  const h = fixture(t);
+  const { rule } = await runQuery(h, '播放QQ音乐热歌榜');
+  assert.equal(rule.command.type, 'play_chart');
+  assert.ok(h.requests.some(u => u.includes('/leaderboard/boards')), '拉了榜单目录');
+  const boardReq = h.requests.find(u => u.includes('/leaderboard/boards'));
+  assert.equal(new URL(boardReq).searchParams.get('source'), 'tx');
+  assert.ok(h.speech.some(s => s.includes('正在加载榜单热歌榜')));
+});
+
+test('平台全称出现在参数里也能识别（播放榜单 + 平台 + 榜名）', async t => {
+  const h = fixture(t);
+  const { rule } = await runQuery(h, '播放榜单网易云新歌榜');
+  assert.ok(rule);
+  assert.equal(rule.command.type, 'play_chart');
+  assert.equal(rule.argument, '网易云新歌榜');
+  await h.engine.executeCommand(rule, 'account', 'speaker');
+  const boardReq = h.requests.find(u => u.includes('/leaderboard/boards'));
+  assert.equal(new URL(boardReq).searchParams.get('source'), 'wy');
+  assert.ok(h.speech.some(s => s.includes('正在加载榜单新歌榜')));
+});
+
 test('「播放榜单飙升榜」把榜单名提取为参数', async t => {
   const h = fixture(t);
   const { rule } = await runQuery(h, '播放榜单飙升榜');
   assert.ok(rule);
   assert.equal(rule.command.type, 'play_chart');
   assert.equal(rule.argument, '飙升榜');
+});
+
+test('常见榜名按字面生效：播放飙升榜 / 播放新歌榜 / 播放排行榜(=热歌榜)', async t => {
+  const h = fixture(t);
+  const prevFetch = globalThis.fetch;
+  const boards = ['热歌榜', '飙升榜', '新歌榜'].map((name, i) => ({
+    id: `wy__${i}`, name, bangid: String(i + 1), source: 'wy',
+  }));
+  globalThis.fetch = async (url) => {
+    if (url.includes('/leaderboard/boards')) return jsonResp({ list: boards, source: 'wy' });
+    return prevFetch(url);
+  };
+  for (const [query, expected] of [
+    ['播放飙升榜', '飙升榜'],
+    ['播放新歌榜', '新歌榜'],
+    ['播放排行榜', '热歌榜'],
+  ]) {
+    h.requests.length = 0;
+    h.speech.length = 0;
+    h.plays.length = 0;
+    const { rule, played } = await runQuery(h, query);
+    assert.equal(rule?.command.type, 'play_chart', `${query} 命中榜单口令`);
+    assert.equal(rule?.argument, '', `${query} 榜名在关键词里`);
+    assert.ok(played, `${query} 起播`);
+    assert.ok(h.speech.some(s => s.includes(`正在加载榜单${expected}`)), `${query} → ${expected}`);
+    assert.equal(h.plays.length, 1, `${query} 只起播一次`);
+  }
+});
+
+test('泛称映射只改完整名称，不误改真实榜名', async t => {
+  const { normalizeChartSpeechName } = load('../src/voicecmd/defaults.ts');
+  assert.equal(normalizeChartSpeechName('排行榜'), '热歌榜');
+  assert.equal(normalizeChartSpeechName('UK排行榜周榜'), 'UK排行榜周榜');
+  assert.equal(normalizeChartSpeechName('排行榜热歌'), '排行榜热歌');
 });
 
 test('play_chart 执行：拉榜单 → 组临时队列 → 起播（不入库）', async t => {

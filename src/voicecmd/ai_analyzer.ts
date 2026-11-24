@@ -15,7 +15,7 @@ const AI_SYSTEM_PROMPT = `从指令中提取出操作和音乐信息，返回JSO
 行为和参数（只允许使用以下参数，不要自定义新字段）：
 - play_song: name(歌曲名), artist(歌手名)
 - play_artist: artist(歌手名)
-- play_chart: chart(榜单名，如热歌榜/飙升榜/新歌榜；用户说"排行榜"而未指明具体榜时用"热歌榜")
+- play_chart: chart(榜单名，如热歌榜/飙升榜/新歌榜；用户说"排行榜"而未指明具体榜时用"热歌榜")，source(可选，仅当用户点名平台时填 kw/kg/tx/wy/mg 之一；未点名则不填)
 - play_playlist: playlist(歌单名)
 - play_index: index(整数,从1起,跳到当前歌单的第N首)
 - set_play_mode: mode=order|random|single|loop|singlePlay(播放模式，singlePlay 表示当前歌曲播完停止)
@@ -34,7 +34,7 @@ const AI_SYSTEM_PROMPT = `从指令中提取出操作和音乐信息，返回JSO
 5. 明确high模糊low其余medium
 6. rawText去语气词、口癖词
 7. "播放XX的歌/歌曲/音乐"或"来几首XX"中，name为泛称（歌/歌曲/音乐/曲/曲子）或无name时→action=play_artist,artist=XX。name为具体歌名时仍为play_song
-8. 含"榜"字的音乐请求（热歌榜/飙升榜/排行榜/榜单等）→action=play_chart，chart填榜单名；这与play_playlist(用户自己的歌单)不同
+8. 含"榜"字的音乐请求（热歌榜/飙升榜/排行榜/榜单等）→action=play_chart，chart填榜单名；这与play_playlist(用户自己的歌单)不同。用户点名了平台时把 source 填成对应别名，并只把榜名填进 chart
 
 示例：
 周杰伦的晴天→{"action":"play_song","params":{"name":"晴天","artist":"周杰伦"},"confidence":"high","rawText":"周杰伦 晴天"}
@@ -44,6 +44,7 @@ const AI_SYSTEM_PROMPT = `从指令中提取出操作和音乐信息，返回JSO
 来几首邓紫棋→{"action":"play_artist","params":{"artist":"邓紫棋"},"confidence":"high","rawText":"邓紫棋"}
 播放热歌榜→{"action":"play_chart","params":{"chart":"热歌榜"},"confidence":"high","rawText":"热歌榜"}
 放个飙升榜→{"action":"play_chart","params":{"chart":"飙升榜"},"confidence":"high","rawText":"飙升榜"}
+点名平台的热歌榜→{"action":"play_chart","params":{"chart":"热歌榜","source":"kw"},"confidence":"high","rawText":"热歌榜"}
 随机播放→{"action":"set_play_mode","params":{"mode":"random"},"confidence":"high","rawText":"随机播放"}
 收藏这首歌→{"action":"favorite","params":{"action":"add"},"confidence":"high","rawText":"收藏这首歌"}
 取消收藏→{"action":"favorite","params":{"action":"remove"},"confidence":"high","rawText":"取消收藏"}

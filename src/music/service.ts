@@ -27,7 +27,7 @@ import type { SongLocation, ArtistSongLocation } from '../indexing/manager';
 import type { MemoryRecord } from '../memory';
 import type { OnlineSearchResult, OnlineArtistQueue } from '../voicecmd/online_searcher';
 import type { ConversationMessage, VoiceCommand, PlayMode, AIAnalysisResult, SearchPriority } from '../types';
-import { getDefaultVoiceCommands } from '../voicecmd/defaults';
+import { getDefaultVoiceCommands, normalizeChartSpeechName, parseSpeechSource } from '../voicecmd/defaults';
 import { conversationQuery, traceConversation } from '../conversation/query';
 export { getDefaultVoiceCommands } from '../voicecmd/defaults';
 
@@ -146,6 +146,14 @@ const FUZZY_MAX_GAP = 4;
 
 /** 跳字模糊匹配：关键词最小 rune 长度（2 字以内控制词如"停止/切歌"不参与，避免误触发） */
 const FUZZY_MIN_KEYWORD_LEN = 3;
+
+/**
+ * 榜单口令的「榜」字校验：平台全称关键词（如「播放QQ音乐」）不能把
+ * 「播放QQ音乐的歌」这类泛请求吃掉，必须有明确榜名才走 play_chart。
+ */
+function chartMatchHasBoardName(keyword: string, argument: string): boolean {
+  return /榜/u.test(keyword) || /榜/u.test(argument);
+}
 
 /** 语音请求到达时给后台索引刷新的短等待窗口。 */
 const INDEX_READY_WAIT_MS = 5000;
@@ -836,6 +844,7 @@ export class MusicCommandService {
         if (idx >= 0 && idx < argumentStart) {
           // 序号口令必须包含完整有效的序号，不能把“播放第一周”等名称当作跳播。
           if (item.cmd.type === 'play_index' && parseSongIndex(query.slice(idx)) <= 0) continue;
+          if (item.cmd.type === 'play_chart' && !chartMatchHasBoardName(keyword, query.slice(idx + keyword.length))) continue;
           const kwLen = Array.from(keyword).length;
           if (kwLen > bestKeywordLen || (kwLen === bestKeywordLen && item.priority < bestPriority)) {
             bestKeywordLen = kwLen;
@@ -866,6 +875,10 @@ export class MusicCommandService {
         const kwRunes = Array.from(keyword);
         const m = fuzzySubseqMatch(qRunes, kwRunes, FUZZY_MAX_GAP);
         if (!m) continue;
+        if (item.cmd.type === 'play_chart') {
+          const argument = qRunes.slice(m.lastIdx + 1).join('');
+          if (!chartMatchHasBoardName(keyword, argument)) continue;
+        }
 
         const kwLen = kwRunes.length;
         const better =
@@ -911,14 +924,22 @@ export class MusicCommandService {
       case 'play_artist':
         playedSong = await this.executePlayArtist(result.argument, accountId, deviceId);
         break;
-      case 'play_chart':
+      case 'play_chart': {
         // 关键词本身含榜名（如「播放热歌榜」）时 argument 为空，用 keyword 剥掉播放动词兜底。
+        // 平台全称可能落在 keyword（如「播放QQ音乐热搜榜」）或 argument（如「播放榜单QQ音乐热歌榜」）里。
+        const kwHit = parseSpeechSource(result.keyword);
+        const argHit = parseSpeechSource(result.argument);
+        const chartText = argHit
+          ? argHit.rest
+          : (result.argument || result.keyword.replace(/^(播放|放|来(一)?(个|份|首)?)\s*/u, ''));
         playedSong = await this.executePlayChart(
-          result.argument || result.keyword.replace(/^(播放|放|来(一)?(个|份|首)?)\s*/u, ''),
+          chartText,
           accountId,
           deviceId,
+          kwHit?.source || argHit?.source,
         );
         break;
+      }
       case 'set_play_mode':
         await this.executeSetPlayMode(accountId, deviceId, result.command.param || result.argument);
         break;
@@ -998,7 +1019,17 @@ export class MusicCommandService {
           songloft.log.warn('[MusicCommandService] [AI] play_chart: no chart name');
           return null;
         }
-        playedSong = await this.executePlayChart(chart, accountId, deviceId);
+        const speechSource = parseSpeechSource(chart);
+        const aiSource = (result.params.source || '').trim();
+        const sourceHint = aiSource
+          ? parseSpeechSource(aiSource)?.source || aiSource
+          : speechSource?.source;
+        playedSong = await this.executePlayChart(
+          speechSource && !aiSource ? speechSource.rest : chart,
+          accountId,
+          deviceId,
+          sourceHint,
+        );
         break;
       }
       case 'play_playlist': {
@@ -1574,10 +1605,19 @@ export class MusicCommandService {
   }
 
   /** 榜单播放：说「播放热歌榜」直接整队播放该榜曲目，无需本地曲库（榜单是纯在线能力）。 */
-  private async executePlayChart(chartName: string, accountId: string, deviceId: string): Promise<PlayedSong | null> {
+  private async executePlayChart(
+    chartName: string,
+    accountId: string,
+    deviceId: string,
+    sourceHint?: string,
+  ): Promise<PlayedSong | null> {
     this.cancelPendingResume(accountId, deviceId);
     const pm = await this.playlistManagerMap.getOrCreate(accountId, deviceId);
-    const cleanName = chartName.replace(/的?(歌曲|歌|音乐)\s*$/u, '').replace(/\s+/g, ' ').trim();
+    const cleanName = normalizeChartSpeechName(chartName
+      .replace(/^的\s*/u, '')
+      .replace(/的?(歌曲|歌|音乐)\s*$/u, '')
+      .replace(/\s+/g, ' ')
+      .trim());
     if (!cleanName) {
       songloft.log.warn('[MusicCommandService] play_chart: empty chart name');
       return null;
@@ -1606,7 +1646,9 @@ export class MusicCommandService {
     const [queue] = await Promise.all([
       this.onlineSearcher.searchChartQueue(
         cleanName,
-        noImport ? { limit: 20, preResolve: 2 } : { limit: 20, importMode: true },
+        noImport
+          ? { limit: 20, preResolve: 2, source: sourceHint }
+          : { limit: 20, importMode: true, source: sourceHint },
       ),
       ttsTask,
     ]);

@@ -100,6 +100,38 @@ test('榜单目录请求：仅带 source 参数，精确命中优先', async t =
   assert.equal(listReq.length, 1, '最高分命中即取曲目，不逐个试');
 });
 
+test('指定音源时只查该源目录，命中该源榜单', async t => {
+  const { searcher, requests } = fixture(t, { handler: chartHandler() });
+  const queue = await searcher.searchChartQueue('热歌榜', { limit: 5, preResolve: 1, source: 'tx' });
+  assert.ok(queue);
+  const boardReqs = requests.filter(r => r.url.includes('/leaderboard/boards'));
+  assert.deepEqual(boardReqs.map(r => new URL(r.url).searchParams.get('source')), ['tx'], '只拉指定源目录');
+  const listReq = requests.find(r => r.url.includes('/leaderboard/list'));
+  assert.equal(new URL(listReq.url).searchParams.get('source'), 'tx');
+  assert.equal(new URL(listReq.url).searchParams.get('bangid'), '26', '命中该源的热歌榜，不是其他源同分榜');
+});
+
+test('指定音源但该源没有榜单时不跨源兜底', async t => {
+  const { searcher, requests } = fixture(t, { handler: chartHandler() });
+  // kw 在 fixture 里没有任何榜单，tx/wy 有热歌榜：指定 kw 时不能偷偷改查别的源
+  assert.equal(await searcher.searchChartQueue('热歌榜', { preResolve: 1, source: 'kw' }), null);
+  assert.deepEqual(
+    requests.filter(r => r.url.includes('/leaderboard/boards')).map(r => new URL(r.url).searchParams.get('source')),
+    ['kw'],
+    '不因为没命中就偷偷去别的源找',
+  );
+});
+
+test('无效 source 回落为跨源搜索', async t => {
+  const { searcher, requests } = fixture(t, { handler: chartHandler() });
+  const queue = await searcher.searchChartQueue('热歌榜', { preResolve: 1, source: 'bogus' });
+  assert.ok(queue);
+  assert.deepEqual(
+    requests.filter(r => r.url.includes('/leaderboard/boards')).map(r => new URL(r.url).searchParams.get('source')),
+    ['kw', 'tx', 'wy'],
+  );
+});
+
 test('榜单名模糊匹配：短名不被长名抢走，精确名优先', async t => {
   const { searcher, requests } = fixture(t, { handler: chartHandler() });
   const queue = await searcher.searchChartQueue('欧美热歌榜', { limit: 5, preResolve: 1 });

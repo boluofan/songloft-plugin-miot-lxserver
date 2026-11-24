@@ -5,6 +5,7 @@
 /// <reference types="@songloft/plugin-sdk" />
 
 import { LxServerClient } from './client';
+import { DEFAULT_LX_SOURCES } from './types';
 import type { LXArtist, LXLeaderboard, LXPlayableUrl, LXServerConfig, LXTrack } from './types';
 import type { LXSongRef } from './ref';
 import { buildSongRef } from './ref';
@@ -414,18 +415,23 @@ export class LxServerProvider {
    *
    * 首批只解析 preResolve 首直链，其余交给播放链路临播前补（与歌手队列同款懒解析）。
    */
-  async chartQueue(name: string, limit = 10, preResolve = 2): Promise<LXChartQueue | null> {
+  async chartQueue(name: string, limit = 10, preResolve = 2, sourceHint?: string): Promise<LXChartQueue | null> {
     this.lastMissReason = null;
     if (!this.isConfigured()) return null;
     const query = name.replace(/\s+/g, ' ').trim();
     const target = normalizeText(query);
     if (!target) return null;
 
-    // 榜单五源全部支持（与歌手检索只有部分源支持不同）。先跨源收集所有目录候选再统一挑，
-    // 这样「欧美热歌榜」的精确命中能压过先配源里「热歌榜」的包含命中；同分才按 sources 顺序。
+    // 指定了平台就只查该源（用户口语里点名的平台是硬约束，不能拿别的源代替）。
+    // 未指定时才跨五源收集，按匹配分统一挑；同分按 sources 顺序。
+    const hint = (sourceHint || '').trim();
+    const sources = hint && DEFAULT_LX_SOURCES.includes(hint as typeof DEFAULT_LX_SOURCES[number])
+      ? [hint]
+      : this.cfg.sources;
+
     const candidates: Array<{ board: LXLeaderboard; source: string; score: number; order: number }> = [];
     let order = 0;
-    for (const source of this.cfg.sources) {
+    for (const source of sources) {
       let boards: LXLeaderboard[];
       try {
         boards = await this.client.leaderboardBoards(source);
