@@ -7,6 +7,7 @@
 #
 # 只读：fetch + log/show/cherry，不改工作区、不动分支指针。
 # 「定制文件」按 base 相对 upstream 的实际改动文件集合动态计算，不维护硬编码清单；
+# 纯文档提交（改动文件全是 *.md / docs/** / LICENSE 等）打 📝 标记，按技能规则一律跳过；
 # 全程不落临时文件（避免在 Windows 上触发文件安全策略）。
 set -uo pipefail
 
@@ -84,8 +85,21 @@ while IFS= read -r sha; do
     fi
   done <<< "$FILES"
 
+  # 纯文档判定：所有改动文件都是文档/日志类时打 📝，按技能规则一律跳过。
+  DOC_ONLY=1
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    case "$f" in
+      *.md|docs/*|*/docs/*|LICENSE*|*.txt|*.svg) ;;
+      *) DOC_ONLY=0; break ;;
+    esac
+  done <<< "$FILES"
+
   echo
-  if [ "$NHITS" -gt 0 ]; then
+  if [ "$DOC_ONLY" -eq 1 ]; then
+    echo "### 📝 \`$short\` $subject"
+    echo "- **纯文档/日志提交（$NFILES 个文件全是文档），按技能规则跳过，不需要 git show 评估**"
+  elif [ "$NHITS" -gt 0 ]; then
     echo "### ⚠ \`$short\` $subject"
     echo "- 文件 $NFILES 个，其中 $NHITS 个是定制文件：$HITS"
   else
