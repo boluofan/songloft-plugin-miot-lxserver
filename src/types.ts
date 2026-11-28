@@ -311,9 +311,9 @@ export interface WebhookConfig {
 
 /** 语音口令配置 */
 export interface VoiceCommand {
-  type: string;            // "play_playlist" | "play_artist" | "play_song" | "set_play_mode" | "set_volume" | "next" | "previous" | "stop"
+  type: string;            // "play_playlist" | "play_artist" | "play_song" | "set_play_mode" | "next" | "previous" | "stop"
   keywords: string[];
-  param?: string;          // 附加参数（播放模式值、音量方向等）
+  param?: string;          // 附加参数（播放模式值等）
   enabled: boolean;
 }
 

@@ -691,7 +691,10 @@ export class ConfigManager {
 
   /** 获取语音口令配置，存储为空时回退到默认口令 */
   async getVoiceCommands(): Promise<VoiceCommand[]> {
-    const commands = await this.load<VoiceCommand[]>(STORAGE_KEY_VOICE_COMMANDS, []);
+    const stored = await this.load<VoiceCommand[]>(STORAGE_KEY_VOICE_COMMANDS, []);
+    // 音量由音响端原生处理，插件不再识别音量口令。老配置里保存的条目在这里过滤，
+    // 不写回存储，用户下次保存设置时才落盘。
+    const commands = stored.filter(command => command.type !== 'set_volume');
     if (commands.length === 0) {
       return getDefaultVoiceCommands();
     }

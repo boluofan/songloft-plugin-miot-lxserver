@@ -41,11 +41,11 @@ for (const phrase of ['停止回答', '退出对话。', '结束对话！']) {
   });
 }
 for (const phase of ['queued', 'preparing', 'generating', 'speaking', 'resuming']) {
-  test(`volume keeps ${phase} chat alive without submitting music or chat`, async (t) => {
-    const h = dispatcherOf(t, { fixed: 'set_volume', active: { phase } });
+  test(`volume during ${phase} chat falls through to native handling, not plugin control`, async (t) => {
+    const h = dispatcherOf(t, { fixed: undefined, active: { phase } });
     h.send('大声一点');
     await flush();
-    assert.deepEqual(h.calls, ['volume']);
+    assert.deepEqual(h.calls, ['interrupt', 'music', 'resume-native', 'release']);
   });
 }
 for (const [name, config, active, expected] of [

@@ -4039,11 +4039,11 @@ test('dispatcher-style guarded music resume preserves both playback timer and ta
   });
 });
 
-test('active chat detects volume controls without enabling the music engine', async () => {
+test('volume controls are no longer intercepted as music engine fixed commands', async () => {
   await withClock(async () => {
     const { manager } = player(), engine = resumeEngine(manager); engine.enabled = false;
     assert.equal(await engine.fixedControlType('大声一点'), undefined);
-    assert.equal(await engine.fixedControlType('大声一点', true), 'set_volume');
+    assert.equal(await engine.fixedControlType('大声一点', true), undefined);
     assert.equal(engine.isEnabled(), false); manager.cleanup();
   });
 });

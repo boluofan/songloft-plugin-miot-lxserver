@@ -67,11 +67,6 @@ export class VoiceDispatcher {
     if (!current())
       return;
     const fixed = await this.music.fixedControlType?.(text, config.enabled && ['queued', 'preparing', 'generating', 'speaking', 'resuming'].includes(active.phase));
-    if (fixed === 'set_volume' && ['queued', 'preparing', 'generating', 'speaking', 'resuming'].includes(active.phase)) {
-      if (current())
-        await this.music.syncVolumeOnly(account, device);
-      return;
-    }
     if (fixed || await this.music.hasFixedControl(text)) {
       traceConversation(message, `固定控制：${fixed || '规则匹配'}`);
       if (!current())

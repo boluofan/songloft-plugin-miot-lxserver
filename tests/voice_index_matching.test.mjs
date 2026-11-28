@@ -92,7 +92,6 @@ function createEngine(commands = defaults.getDefaultVoiceCommands()) {
   engine.executeNext = async () => { actions.push({ type: 'next' }); };
   engine.executeStop = async () => { actions.push({ type: 'stop' }); };
   engine.executeResume = async () => { actions.push({ type: 'resume' }); };
-  engine.executeSetVolume = async () => { actions.push({ type: 'set_volume' }); };
   engine.executeSetPlayMode = async () => { actions.push({ type: 'set_play_mode' }); };
   engine.executeSleepTimer = async () => { actions.push({ type: 'sleep_timer' }); };
   return { engine, actions };
@@ -233,7 +232,6 @@ test('resume is handled before memory and AI fallback', async () => {
 for (const [query, type] of [
   ['下一首', 'next'],
   ['停止播放', 'stop'],
-  ['音量调到30', 'set_volume'],
   ['随机播放', 'set_play_mode'],
   ['30分钟后停止播放', 'sleep_timer'],
 ]) {
@@ -369,3 +367,74 @@ for (const name of ['继续听', '取消收藏歌曲', '不存在的歌单']) {
     }
   });
 }
+
+// ===== AI 口令解析优先于本地搜索口令 =====
+function withAI(engine, analysis) {
+  engine.configManager.getAIConfig = async () => ({ enabled: true, api_url: 'https://example.test/v1', api_key: 'k' });
+  engine.aiAnalyzer = { analyze: async () => analysis };
+}
+
+test('AI analysis takes priority over a matching local search command', async () => {
+  const { engine, actions } = createEngine();
+  withAI(engine, { action: 'play_song', params: { name: '晴天FromAI' }, confidence: 'high', rawText: '晴天FromAI' });
+  await handleQuery(engine, '播放歌曲晴天FromAI');
+  assert.deepEqual(actions, [{ type: 'play_song', name: '晴天FromAI' }]);
+});
+
+test('low-confidence AI falls back to the local search command', async () => {
+  const { engine, actions } = createEngine();
+  withAI(engine, { action: 'unknown', params: {}, confidence: 'low', rawText: '' });
+  await handleQuery(engine, '播放歌单启蒙第一周');
+  assert.deepEqual(actions, [{ type: 'play_playlist', name: '启蒙第一周' }]);
+});
+
+test('AI returning null falls back to the local search command', async () => {
+  const { engine, actions } = createEngine();
+  withAI(engine, null);
+  await handleQuery(engine, '播放歌曲晴天');
+  assert.deepEqual(actions, [{ type: 'play_song', name: '晴天' }]);
+});
+
+test('fixed controls still run before AI analysis', async () => {
+  const { engine, actions } = createEngine();
+  let called = false;
+  engine.configManager.getAIConfig = async () => { called = true; return { enabled: true, api_url: 'https://example.test/v1', api_key: 'k' }; };
+  engine.aiAnalyzer = { analyze: async () => ({ action: 'next', params: {}, confidence: 'high' }) };
+  await handleQuery(engine, '下一首');
+  assert.deepEqual(actions, [{ type: 'next' }]);
+  assert.equal(called, false);
+});
+
+test('AI cooldown skips analysis after repeated failures and uses local commands', async () => {
+  const { engine, actions } = createEngine();
+  let calls = 0;
+  engine.configManager.getAIConfig = async () => ({ enabled: true, api_url: 'https://example.test/v1', api_key: 'k' });
+  engine.aiAnalyzer = { analyze: async () => { calls++; return null; } };
+  for (let i = 0; i < 4; i++) await handleQuery(engine, '播放歌曲晴天');
+  assert.equal(calls, 3);
+  assert.equal(actions.length, 4);
+  assert.ok(actions.every(a => a.type === 'play_song'));
+});
+
+test('volume requests are not intercepted by local commands or AI', async () => {
+  const { engine, actions } = createEngine();
+  let called = false;
+  engine.configManager.getAIConfig = async () => { called = true; return { enabled: true, api_url: 'https://example.test/v1', api_key: 'k' }; };
+  engine.aiAnalyzer = { analyze: async () => { called = true; return { action: 'unknown', params: {}, confidence: 'high' }; } };
+  await handleQuery(engine, '大声一点');
+  assert.deepEqual(actions, []);
+  assert.equal(called, true);
+});
+
+test('AI cooldown state is shared with current-scoped request copies', async () => {
+  const { engine } = createEngine();
+  engine.aiHealth = { failures: 0, cooldownUntil: 0 };
+  const scoped = Object.create(engine);
+  scoped.noteAIHealth(false);
+  scoped.noteAIHealth(false);
+  scoped.noteAIHealth(false);
+  assert.equal(engine.aiHealth.failures, 0);
+  assert.ok(engine.aiHealth.cooldownUntil > Date.now());
+  assert.equal(engine.aiAnalysisAvailable({ enabled: true }), false);
+  assert.equal(scoped.aiAnalysisAvailable({ enabled: true }), false);
+});

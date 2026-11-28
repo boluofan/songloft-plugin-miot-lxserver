@@ -35,6 +35,7 @@ const AI_SYSTEM_PROMPT = `从指令中提取出操作和音乐信息，返回JSO
 6. rawText去语气词、口癖词
 7. "播放XX的歌/歌曲/音乐"或"来几首XX"中，name为泛称（歌/歌曲/音乐/曲/曲子）或无name时→action=play_artist,artist=XX。name为具体歌名时仍为play_song
 8. 含"榜"字的音乐请求（热歌榜/飙升榜/排行榜/榜单等）→action=play_chart，chart填榜单名；这与play_playlist(用户自己的歌单)不同。用户点名了平台时把 source 填成对应别名，并只把榜名填进 chart
+9. 音量调节（大声/小声/音量调到X/静音等）由音响设备自身处理，不属于插件动作，返回action=unknown
 
 示例：
 周杰伦的晴天→{"action":"play_song","params":{"name":"晴天","artist":"周杰伦"},"confidence":"high","rawText":"周杰伦 晴天"}

@@ -3,7 +3,7 @@ import { VoiceResumeCoordinator } from '../playback/voice_resume';
 import { SleepTimerService } from '../playback/sleep_timer';
 // MIoT 智能音箱插件 - 语音口令引擎
 // 翻译自 Go 源码: plugins/songloft-plugin-xiaomi/voicecmd/engine.go
-// 匹配用户语音指令并执行对应动作（播放歌单/歌曲、切歌、停止、音量、播放模式）
+// 匹配用户语音指令并执行对应动作（播放歌单/歌曲、切歌、停止、播放模式）
 
 /// <reference types="@songloft/plugin-sdk" />
 
@@ -26,7 +26,7 @@ import type { PlaylistManager } from '../player/manager';
 import type { SongLocation, ArtistSongLocation } from '../indexing/manager';
 import type { MemoryRecord } from '../memory';
 import type { OnlineSearchResult, OnlineArtistQueue } from '../voicecmd/online_searcher';
-import type { ConversationMessage, VoiceCommand, PlayMode, AIAnalysisResult, SearchPriority } from '../types';
+import type { ConversationMessage, VoiceCommand, PlayMode, AIConfig, AIAnalysisResult, SearchPriority } from '../types';
 import { getDefaultVoiceCommands, normalizeChartSpeechName, parseSpeechSource } from '../voicecmd/defaults';
 import { conversationQuery, traceConversation } from '../conversation/query';
 export { getDefaultVoiceCommands } from '../voicecmd/defaults';
@@ -130,7 +130,6 @@ const COMMAND_PRIORITY: Record<string, number> = {
   'play_playlist': 2,
   'play_index': 2,
   'set_play_mode': 3,
-  'set_volume': 4,
   'favorite': 5,
   'next': 6,
   'previous': 7,
@@ -161,8 +160,12 @@ const INDEX_READY_WAIT_MS = 5000;
 /** 本地独立歌曲 URL 健康检查超时（ms），利用 TTS 播报窗口期异步验证，不增加用户感知延迟。 */
 const URL_HEALTH_CHECK_TIMEOUT_MS = 3000;
 
+/** AI 口令解析连续失败上限；达到后短时降级到纯本地口令，避免每条指令都先等一次超时。 */
+const AI_FAILURE_LIMIT = 3;
+const AI_COOLDOWN_MS = 60_000;
+
 // resume 必须进入真实语音消息的固定控制匹配，否则停止后的「继续播放」无法恢复自动切歌（songloft-org/songloft#490）。
-const FIXED_CONTROL_COMMAND_TYPES = new Set(['set_play_mode', 'set_volume', 'favorite', 'next', 'previous', 'resume', 'stop', 'sleep_timer', 'cancel_sleep_timer', 'query_sleep_timer', 'play_index']);
+const FIXED_CONTROL_COMMAND_TYPES = new Set(['set_play_mode', 'favorite', 'next', 'previous', 'resume', 'stop', 'sleep_timer', 'cancel_sleep_timer', 'query_sleep_timer', 'play_index']);
 const SEARCH_COMMAND_TYPES = new Set(['play_song', 'play_playlist', 'play_artist', 'play_chart']);
 const BUILTIN_STOP_KEYWORDS = ['暂停播放', '停止播放', '暂停音乐', '停一下', 'pause', 'stop', '暂停'];
 
@@ -236,6 +239,8 @@ export class MusicCommandService {
   private memoryInitialized: boolean = false;
   private enabled: boolean = false;
   private sleepTimerService?: SleepTimerService;
+  // 用对象承载，带 current 的请求 Object.create(this) 派生时会共享同一引用，熔断跨请求生效。
+  private aiHealth = { failures: 0, cooldownUntil: 0 };
 
   constructor(
     configManager: ConfigManager,
@@ -352,14 +357,42 @@ export class MusicCommandService {
       songloft.log.warn('[VoiceMemoryV2] error fallback stage="config_or_memory" error="' + String(error) + '"');
     }
 
-    // 歌曲/歌单规则匹配
+    // AI 口令解析优先于本地搜索口令：固定控制与点歌记忆已在前面短路，不会被 AI 抢占。
+    // 仅启用且不在熔断期才先解析；低置信度、未识别或请求失败都回退到本地搜索口令。
+    const aiConfig = await this.configManager.getAIConfig();
+    if (options.current?.() === false) return false;
+    let aiAnalysisFailed = false;
+    if (this.aiAnalysisAvailable(aiConfig)) {
+      songloft.log.info(`[MusicCommandService] [AI] Analyzing query="${query}"`);
+      const aiResult = await this.aiAnalyzer.analyze(query, aiConfig, options.current, JSON.stringify([accountId, msg.device_id]));
+      if (options.current?.() === false) return false;
+      if (aiResult) {
+        this.noteAIHealth(true);
+        traceConversation(msg, `AI 分析：${aiResult.action}（${aiResult.confidence}）；参数：${JSON.stringify(aiResult.params)}`);
+        songloft.log.info(`[MusicCommandService] [AI] Done: action=${aiResult.action} confidence=${aiResult.confidence} params=${JSON.stringify(aiResult.params)}`);
+        if (aiResult.confidence !== 'low' && aiResult.action !== 'unknown') {
+          songloft.log.info(`[MusicCommandService] [AI] → Executing (action=${aiResult.action})`);
+          const playedSong = await this.executeAIResult(aiResult, accountId, msg.device_id, { current: options.current, nativeReply: msg.message.response.answer[0]?.content });
+          if (memoryEnabled && (aiResult.action === 'play_song' || aiResult.action === 'play_artist') && playedSong) {
+            this.queueMemorySuccess(query, playedSong);
+          }
+          return true;
+        }
+        songloft.log.info(`[MusicCommandService] [AI] → Not accepted (action=${aiResult.action}, confidence=${aiResult.confidence}); falling back to local`);
+      } else {
+        this.noteAIHealth(false);
+        aiAnalysisFailed = true;
+        songloft.log.info(`[MusicCommandService] [AI] → analyze returned null; falling back to local`);
+      }
+    }
+
+    // 本地搜索口令兜底：AI 关闭、熔断中、未达标或失败时才走到这里。
     songloft.log.info(`[MusicCommandService] [Rule] Matching search query="${query}"`);
     const result = ruleResult && SEARCH_COMMAND_TYPES.has(ruleResult.command.type) ? ruleResult : null;
     if (result) {
       traceConversation(msg, `点歌规则：${result.keyword}；参数：${result.argument}`);
       songloft.log.info(`[MusicCommandService] [Rule] → Matched search: type=${result.command.type} keyword="${result.keyword}" argument="${result.argument}"`);
 
-      // 执行口令
       const playedSong = await this.executeCommand(result, accountId, msg.device_id);
       if (memoryEnabled && (result.command.type === 'play_song' || result.command.type === 'play_artist') && playedSong) {
         this.queueMemorySuccess(query, playedSong);
@@ -369,35 +402,14 @@ export class MusicCommandService {
 
     songloft.log.info(`[MusicCommandService] [Rule] No search match found`);
 
-    // AI 兜底（如果启用）
-    const aiConfig = await this.configManager.getAIConfig();
-    if (aiConfig.enabled) {
-      songloft.log.info(`[MusicCommandService] [AI] Analyzing query="${query}"`);
-      const aiResult = await this.aiAnalyzer.analyze(query, aiConfig, options.current, JSON.stringify([accountId, msg.device_id]));
-      if (options.current?.() === false) return false;
-      if (aiResult) {
-        traceConversation(msg, `AI 分析：${aiResult.action}（${aiResult.confidence}）；参数：${JSON.stringify(aiResult.params)}`);
-        songloft.log.info(`[MusicCommandService] [AI] Done: action=${aiResult.action} confidence=${aiResult.confidence} params=${JSON.stringify(aiResult.params)}`);
-        if (aiResult.confidence !== 'low' && aiResult.action !== 'unknown') {
-          songloft.log.info(`[MusicCommandService] [AI] → Executing fallback (high confidence, action=${aiResult.action})`);
-          const playedSong = await this.executeAIResult(aiResult, accountId, msg.device_id, { current: options.current, nativeReply: msg.message.response.answer[0]?.content });
-          if (memoryEnabled && (aiResult.action === 'play_song' || aiResult.action === 'play_artist') && playedSong) {
-            this.queueMemorySuccess(query, playedSong);
-          }
-          return true;
-        }
-        songloft.log.info(`[MusicCommandService] [AI] → No fallback execution (action=${aiResult.action}, confidence=${aiResult.confidence})`);
-      } else {
-        songloft.log.info(`[MusicCommandService] [AI] → No fallback execution (analyze returned null)`);
-        if (aiConfig.api_url && aiConfig.api_key && hasMusicRequestCue(query) && !options.suppressAnalysisFailureHint?.()) {
-          try {
-            await this.minaService.textToSpeech(accountId, msg.device_id, '暂时没能识别这条指令，请再说一次', options.current);
-          } catch (error) {
-            songloft.log.warn(`[MusicCommandService] AI failure hint failed: ${String(error)}`);
-          }
-          if (options.current?.() === false) return false;
-        }
+    // 只有明确音乐请求且 AI 本次确实调用失败才提示；未启用 AI 或低置信度都不误报。
+    if (aiAnalysisFailed && aiConfig.api_url && aiConfig.api_key && hasMusicRequestCue(query) && !options.suppressAnalysisFailureHint?.()) {
+      try {
+        await this.minaService.textToSpeech(accountId, msg.device_id, '暂时没能识别这条指令，请再说一次', options.current);
+      } catch (error) {
+        songloft.log.warn(`[MusicCommandService] AI failure hint failed: ${String(error)}`);
       }
+      if (options.current?.() === false) return false;
     }
 
     // 任何语音交互都会唤醒音箱并打断 URL 播放。
@@ -412,15 +424,37 @@ export class MusicCommandService {
     return false;
   }
 
+  /**
+   * AI 是否可用于本次解析：配置完整且未在失败熔断期。
+   * 「已验证通过」没有持久化状态，改用配置完整性 + 运行时熔断保证失败时能回退本地。
+   */
+  private aiAnalysisAvailable(config: AIConfig): boolean {
+    // api_url/api_key 的完整性仍由 AIAnalyzer.analyze 判定（缺配置时它返回 null，
+    // 会走 noteAIHealth(false) 与本地兜底），这里只管开关和熔断，避免两处重复判定。
+    // 测试用 Object.create(prototype) 构造实例时 aiHealth 可能缺失，用可选链兜底。
+    return config.enabled && Date.now() >= (this.aiHealth?.cooldownUntil ?? 0);
+  }
+
+  /** 记录一次 AI 调用结果；连续失败达到上限后短时停用，避免每条指令都先等一次超时。 */
+  private noteAIHealth(ok: boolean): void {
+    const health = this.aiHealth ?? (this.aiHealth = { failures: 0, cooldownUntil: 0 });
+    if (ok) {
+      health.failures = 0;
+      return;
+    }
+    health.failures += 1;
+    if (health.failures >= AI_FAILURE_LIMIT) {
+      health.cooldownUntil = Date.now() + AI_COOLDOWN_MS;
+      health.failures = 0;
+      songloft.log.warn(`[MusicCommandService] AI cooldown ${AI_COOLDOWN_MS}ms after ${AI_FAILURE_LIMIT} consecutive failures`);
+    }
+  }
+
   async fixedControlType(query: string, includeDisabled = false): Promise<string | undefined> {
     if (!this.enabled && !includeDisabled) return undefined;
     const result = await this.matchRuleCommand(query);
     return result && FIXED_CONTROL_COMMAND_TYPES.has(result.command.type) ? result.command.type : undefined;
   }
-  async syncVolumeOnly(accountId: string, deviceId: string): Promise<void> {
-    await this.minaService.syncVolumeFromDevice(accountId, deviceId);
-  }
-
   async hasFixedControl(query: string): Promise<boolean> {
     if (!this.enabled) return false;
     const result = await this.matchRuleCommand(query);
@@ -943,9 +977,6 @@ export class MusicCommandService {
       case 'set_play_mode':
         await this.executeSetPlayMode(accountId, deviceId, result.command.param || result.argument);
         break;
-      case 'set_volume':
-        await this.executeSetVolume(accountId, deviceId, result.command.param || 'absolute', result.argument);
-        break;
       case 'next':
         await this.executeNext(accountId, deviceId);
         break;
@@ -1059,12 +1090,6 @@ export class MusicCommandService {
         await this.executeSetPlayMode(accountId, deviceId, mode);
         break;
       }
-      /*case 'set_volume': {
-        const direction = result.params.direction || 'absolute';
-        const volume = result.params.volume;
-        await this.executeSetVolume(accountId, deviceId, direction, volume !== undefined ? String(volume) : '');
-        break;
-      }*/
       case 'next':
         await this.executeNext(accountId, deviceId);
         break;
@@ -1101,7 +1126,7 @@ export class MusicCommandService {
    * 非播放类命令执行后，尝试恢复被小爱语音唤醒中断的 URL 播放
    */
   private tryResumePlayback(commandType: string, wasPlaying: boolean, pm: import('../player/manager').PlaylistManager | null, accountId: string, deviceId: string): void {
-    const isNonPlaybackCommand = commandType === 'set_volume' || commandType === 'set_play_mode' || commandType === 'favorite';
+    const isNonPlaybackCommand = commandType === 'set_play_mode' || commandType === 'favorite';
     if (!isNonPlaybackCommand || !wasPlaying || !pm) return;
 
     pm.suspendForVoiceInteraction();
@@ -2113,45 +2138,6 @@ export class MusicCommandService {
   }
 
   /**
-   * 音量口令后等固件把音量落定再读回的时间。
-   *
-   * 对话记录本身已比用户说话晚 1~2 秒（实测 addMessage 比 ts 晚约 1.3s），加上这一拍基本能保证
-   * 读到的是小爱调整后的值。万一读早了也只是这一轮缓存偏旧，4 秒后 /mina/status 穿透会自我纠正。
-   */
-  private static readonly VOLUME_SETTLE_MS = 800;
-
-  /**
-   * 处理音量口令：**不下发音量，只读回设备真实值**。
-   *
-   * 「大声/小声一点」「音量调到 X」这类口令小爱固件原生就会处理（f81e0fe 把音量从 AI 分析里
-   * 摘掉时已经认定「音响本身可实现」，只是规则匹配这条漏了）。插件再算一次 ±10 下发 player_set_volume
-   * 就成了同一条口令调两次音量，用户听到小爱播报 15% 而界面显示插件自己算出的 25%
-   * ——因为旧实现把**目标值**而非设备真实值写进了状态缓存并锁定 10 秒
-   * （songloft-org/songloft-plugin-miot#61 问题 2）。这条多余的 player_set_volume 同时也是
-   * 「调音量后静音」的触发点之一（同 issue 问题 3）。
-   *
-   * 分组仍需显式对齐：固件只调了听到口令的那台，组内其他成员靠 fanOutSetVolume 跟上。
-   *
-   * @param param - 音量方向："absolute"|"up"|"down"（保留入参用于日志，行为已不依赖它）
-   * @param argument - 口令关键词后的文本（同上，仅日志）
-   */
-  private async executeSetVolume(accountId: string, deviceId: string, param: string, argument: string): Promise<void> {
-    await new Promise(r => setTimeout(r, MusicCommandService.VOLUME_SETTLE_MS));
-
-    const volume = await this.minaService.syncVolumeFromDevice(accountId, deviceId);
-    if (volume < 0) {
-      songloft.log.warn(`[MusicCommandService] Volume command handled by 小爱, but reading it back failed (param=${param} argument="${argument}")`);
-      return;
-    }
-
-    // 读回值就是设备真相，不需要 lockVolume 去挡云端「旧值」——那把锁是为了保护
-    // 「插件刚下发、云端还没同步」的窗口，现在没有下发这一步了。
-    updateDeviceStatusCache(accountId, deviceId, { volume });
-    await this.groupCoordinator?.fanOutSetVolume(accountId, deviceId, volume);
-    songloft.log.info(`[MusicCommandService] Volume synced from device: ${volume} (handled by 小爱, not re-applied; param=${param})`);
-  }
-
-  /**
    * 执行下一首
    */
   private async executeNext(accountId: string, deviceId: string): Promise<void> {
@@ -2437,7 +2423,6 @@ export class MusicCommandService {
 
 }
 
-// extractNumber / parseChineseNumber 随 executeSetVolume 改为「只读回不下发」一并删除：
-// 它们唯一的用途是从「音量调到五十/百分之五十」里解析目标值，而现在目标值由小爱固件自己决定，
-// 插件不再需要理解口令里的数字（含 songloft-org/songloft#166 那个「百分之X」被解析成 100 的修复）。
-// 若将来发现某型号固件确实不原生处理音量、需要插件兜底下发，从 git 历史取回即可。
+// 音量口令已从插件移除：音量是音响端原生处理的通用设备控制，插件既不解析也不下发。
+// 网页音量条、定时任务里的显式音量设置仍走各自的接口，不受此影响。
+// 若将来需要恢复语音调音量，从 git 历史取回 executeSetVolume 及 extractNumber / parseChineseNumber 即可。
