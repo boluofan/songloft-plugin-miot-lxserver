@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/songloft-org/plugin-toolchain/main/schemas/plugin.schema.json",
   "name": "智能音箱",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "description": "通过 MIoT 协议把歌曲投放到智能音箱设备（lxserver 定制版）",
   "author": "Boluofan",
   "homepage": "https://github.com/boluofan/songloft-plugin-miot-lxserver",
